@@ -71,7 +71,12 @@ def check_container_policy() -> None:
         raise RuntimeError("production container root filesystem is writable")
     if "ALL" not in (host.get("CapDrop") or []):
         raise RuntimeError("production container does not drop all capabilities")
-    cap_add = set(host.get("CapAdd") or [])
+    # Docker Engine inspect may return capability names with the Linux CAP_ prefix.
+    # Normalize that API representation while preserving the strict allow-list.
+    cap_add = {
+        capability.removeprefix("CAP_")
+        for capability in (host.get("CapAdd") or [])
+    }
     if cap_add != {"SYS_ADMIN", "SYS_CHROOT"}:
         raise RuntimeError(f"unexpected production capabilities: {sorted(cap_add)}")
     if "apparmor:unconfined" not in (host.get("SecurityOpt") or []):
