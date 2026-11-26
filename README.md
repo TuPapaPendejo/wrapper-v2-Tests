@@ -141,7 +141,7 @@ ctest --test-dir build/ci-native --output-on-failure
 python3 -B -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-HTTP and supervisor integration tests use a synthetic worker; they do not exercise Apple's proprietary authentication path. The native C++ CI step exercises the shared protocol and launcher tests, not the Apple-specific Android binary. Linux namespace tests require `unshare` and the relevant kernel permissions. GitHub Actions also pins the Rust toolchain and third-party action revisions. Passing synthetic checks does not replace a live test against the pinned Apple Music build.
+HTTP and supervisor integration tests use a synthetic worker; they do not exercise Apple's proprietary authentication path. The native C++ CI step exercises the shared protocol and launcher tests, not the Apple-specific Android binary. Linux namespace tests require `unshare` and the relevant kernel permissions. GitHub Actions also pins the Rust toolchain and third-party action revisions. Fork repositories may need Actions enabled manually; this workflow supports both pushes to `audit/security-hardening` and manual dispatch so the draft branch can be tested without making its PR ready for review. Passing synthetic checks does not replace a live test against the pinned Apple Music build.
 
 Optional native-only developer workflows are available through `tools/build.sh` and `tools/build-local.sh`; they require their documented toolchains and are not necessary for the Docker build.
 

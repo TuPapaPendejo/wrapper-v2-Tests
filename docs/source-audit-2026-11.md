@@ -186,6 +186,15 @@ cannot confirm `AuthenticateFlow`, live 2FA, cached-token validation,
 playback, or actual Temari context capture. Private real-runtime tests remain
 necessary for those paths.
 
+**Fork activation gate:** the draft branch is in a fork repository. GitHub
+documents that Actions workflows do not run in forked repositories until
+Actions is enabled for that fork. At the time this audit update was prepared,
+the repository returned zero workflow runs and zero check-runs for the draft
+head. The workflow now supports a push to `audit/security-hardening` and
+`workflow_dispatch`; after enabling Actions in the fork's Actions tab, run
+the workflow manually against this branch or push a subsequent commit. Until
+then, CI is configured but not executed.
+
 ### F-07 — Builder inputs are not fully reproducible
 
 **Severity:** Medium for supply-chain/rebuild reproducibility  
