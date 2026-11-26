@@ -95,10 +95,7 @@ pub fn resolve(
     let identity = format!("{DEVICE_PREFIX}{}", random_android_id()?);
     // Keep the temporary filename's entropy at 128 bits; it is independent
     // of the 64-bit Android ID format required by the client fingerprint.
-    let temp_path = directory.join(format!(
-        ".wrapper-device-info-{}.tmp",
-        random_hex::<16>()?
-    ));
+    let temp_path = directory.join(format!(".wrapper-device-info-{}.tmp", random_hex::<16>()?));
     let write_result = (|| -> Result<(), ApiError> {
         let mut temp = OpenOptions::new()
             .write(true)
@@ -175,7 +172,8 @@ mod tests {
     fn existing_generated_identity_is_never_migrated_or_rotated() {
         let base = directory();
         // Existing 1.0.0 installations may have the previous 32-hex suffix.
-        let legacy = "Music/4.9/Android/10/Samsung S9/7663313/en-US/en-US/00112233445566778899aabbccddeeff";
+        let legacy =
+            "Music/4.9/Android/10/Samsung S9/7663313/en-US/en-US/00112233445566778899aabbccddeeff";
         fs::write(base.join(FILE_NAME), format!("{legacy}\n")).unwrap();
 
         assert_eq!(resolve(&base, "/", None).unwrap(), legacy);

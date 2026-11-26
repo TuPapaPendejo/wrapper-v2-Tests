@@ -441,7 +441,9 @@ mod tests {
     fn api_token_is_optional_for_backward_compatibility() {
         assert!(bearer_token_matches(None, None));
         assert!(bearer_token_matches(
-            Some(&header::HeaderValue::from_static("Bearer ignored-for-legacy-mode")),
+            Some(&header::HeaderValue::from_static(
+                "Bearer ignored-for-legacy-mode"
+            )),
             None
         ));
     }
@@ -471,7 +473,10 @@ mod tests {
         assert!(!requires_authentication("/health", &Method::GET));
         assert!(requires_authentication("/health", &Method::POST));
         assert!(requires_authentication("/info", &Method::GET));
-        assert!(requires_authentication("/session/credentials", &Method::GET));
+        assert!(requires_authentication(
+            "/session/credentials",
+            &Method::GET
+        ));
     }
 
     #[test]

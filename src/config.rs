@@ -109,9 +109,9 @@ fn parse_api_token(value: Option<String>) -> Result<Option<Zeroizing<String>>, A
     };
     // Hex/base64url-style tokens only; generate at least 256 bits of entropy.
     if !(43..=256).contains(&value.len())
-        || !value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
-        })
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
     {
         return Err(ApiError::bad_config("WRAPPER_API_TOKEN"));
     }
@@ -149,16 +149,19 @@ mod environment_tests {
     fn api_token_is_optional_but_validated_when_configured() {
         assert!(parse_api_token(None).unwrap().is_none());
         assert_eq!(
-            parse_api_token(Some("a".repeat(64))).unwrap().unwrap().as_str(),
+            parse_api_token(Some("a".repeat(64)))
+                .unwrap()
+                .unwrap()
+                .as_str(),
             "a".repeat(64)
         );
         assert!(parse_api_token(Some(String::new())).is_err());
         assert!(parse_api_token(Some("short".to_string())).is_err());
         assert!(parse_api_token(Some("a".repeat(257))).is_err());
-        assert!(
-            parse_api_token(Some("contains spaces ................................".to_string()))
-                .is_err()
-        );
+        assert!(parse_api_token(Some(
+            "contains spaces ................................".to_string()
+        ))
+        .is_err());
     }
 
     #[test]
