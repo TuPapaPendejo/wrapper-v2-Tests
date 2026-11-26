@@ -48,6 +48,10 @@ def request(port, method, path, payload=None, token=TOKEN):
     return response.status, json.loads(response.read())
 
 
+@unittest.skipUnless(
+    os.environ.get("WRAPPER_RUN_CONTAINER_SMOKE") == "1",
+    "run only in the dedicated Docker container job",
+)
 class SyntheticContainerSmoke(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
