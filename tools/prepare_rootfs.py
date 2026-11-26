@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
 """Stage a new rootfs from the user's APK/APKM and pinned Android system files."""
-import argparse, hashlib, io, json, os, shutil, tempfile, zipfile
+
+import argparse
+import hashlib
+import io
+import json
+import shutil
+import tempfile
+import zipfile
 from pathlib import Path
+
 from architecture import load_profile, verify_elf
-ROOT=Path(__file__).resolve().parents[1]
-PINS=load_profile()
-def digest(data):return hashlib.sha256(data).hexdigest()
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PINS = load_profile()
+MAX_APK_ENTRY_SIZE = 128 * 1024 * 1024
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
 
 def profile_metadata(pins, certificate):
-    """Record the CA bundle identity without embedding or exposing certificates."""
+    """Record the CA bundle identity without embedding certificate contents."""
     keys = ("architecture", "profile", "context_profile", "context_supported")
     metadata = {key: pins[key] for key in keys}
     metadata["ca_bundle_sha256"] = digest(certificate)
@@ -17,95 +32,202 @@ def profile_metadata(pins, certificate):
 
 def extract_apple(source, pins=None):
     pins = pins or PINS
-    split = pins["apk_split"]
+    split_name = pins["apk_split"]
     split_in_bundle = False
+
     with zipfile.ZipFile(source) as outer:
-        if split in outer.namelist():
+        if split_name in outer.namelist():
             split_in_bundle = True
-            if "base.apk" not in outer.namelist() or outer.getinfo("base.apk").file_size>128*1024*1024:raise ValueError("missing or oversized base APK")
-            with zipfile.ZipFile(io.BytesIO(outer.read("base.apk"))) as base:
-                if digest(base.read("AndroidManifest.xml"))!=pins["base_manifest_sha256"]:raise ValueError("unsupported APK build")
-            info=outer.getinfo(split)
-            if info.file_size>128*1024*1024:raise ValueError("oversized APK split")
-            archive=zipfile.ZipFile(io.BytesIO(outer.read(info)))
-        else:archive=outer
+            if "base.apk" not in outer.namelist():
+                raise ValueError("missing or oversized base APK")
+            base_info = outer.getinfo("base.apk")
+            if base_info.file_size > MAX_APK_ENTRY_SIZE:
+                raise ValueError("missing or oversized base APK")
+
+            with zipfile.ZipFile(io.BytesIO(outer.read(base_info))) as base:
+                base_manifest = base.read("AndroidManifest.xml")
+            if digest(base_manifest) != pins["base_manifest_sha256"]:
+                raise ValueError("unsupported APK build")
+
+            split_info = outer.getinfo(split_name)
+            if split_info.file_size > MAX_APK_ENTRY_SIZE:
+                raise ValueError("oversized APK split")
+            archive = zipfile.ZipFile(io.BytesIO(outer.read(split_info)))
+        else:
+            archive = outer
+
         try:
-            # A standalone APK may be a pinned architecture split or an APK
-            # whose base manifest and architecture-specific native libraries
-            # are packaged together. An APKM must have the exact pinned split.
             expected_manifests = {pins["split_manifest_sha256"]}
-            if not split_in_bundle: expected_manifests.add(pins["base_manifest_sha256"])
-            if "AndroidManifest.xml" not in archive.namelist() or digest(archive.read("AndroidManifest.xml")) not in expected_manifests:raise ValueError("unsupported APK architecture/build")
-            files={}
-            for name,expected in pins["apple_libraries"].items():
-                path="lib/"+pins["architecture"]+"/"+name
-                matches=[i for i in archive.infolist() if i.filename==path]
-                if len(matches)!=1 or matches[0].file_size>128*1024*1024:raise ValueError("missing or ambiguous pinned library: "+name)
-                data=archive.read(matches[0])
-                if digest(data)!=expected:raise ValueError("unsupported Apple library: "+name)
+            if not split_in_bundle:
+                expected_manifests.add(pins["base_manifest_sha256"])
+
+            if "AndroidManifest.xml" not in archive.namelist():
+                raise ValueError("unsupported APK architecture/build")
+            manifest = archive.read("AndroidManifest.xml")
+            if digest(manifest) not in expected_manifests:
+                raise ValueError("unsupported APK architecture/build")
+
+            files = {}
+            architecture = pins["architecture"]
+            for name, expected_hash in pins["apple_libraries"].items():
+                library_path = f"lib/{architecture}/{name}"
+                matches = [
+                    entry for entry in archive.infolist()
+                    if entry.filename == library_path
+                ]
+                if len(matches) != 1 or matches[0].file_size > MAX_APK_ENTRY_SIZE:
+                    raise ValueError("missing or ambiguous pinned library: " + name)
+
+                data = archive.read(matches[0])
+                if digest(data) != expected_hash:
+                    raise ValueError("unsupported Apple library: " + name)
                 verify_elf(data, pins)
-                files[name]=data
+                files[name] = data
+
             return files
         finally:
-            if archive is not outer:archive.close()
-def stage(apk,system,worker,output,ca,pins=None):
+            if archive is not outer:
+                archive.close()
+
+
+def stage(apk, system, worker, output, ca, pins=None):
     pins = pins or PINS
-    output=output.absolute()
-    if output.exists():raise ValueError("output must not exist")
-    # Verify every source before creating the rootfs, and only copy allowlisted paths.
-    apple=extract_apple(apk,pins)
-    android={}
-    for rel,expected in pins["android_system"].items():
-        source=system/rel
-        if source.is_symlink() or not source.is_file():raise ValueError("missing Android artifact: "+rel)
-        data=source.read_bytes()
-        if digest(data)!=expected:raise ValueError("unsupported Android artifact: "+rel)
-        if rel.startswith(("bin/", "lib64/")): verify_elf(data, pins)
-        android[rel]=data
-    executable=worker.read_bytes()
-    verify_elf(executable, pins)
-    certificate=ca.read_bytes()
-    if b"-----BEGIN CERTIFICATE-----" not in certificate:raise ValueError("invalid CA bundle")
-    output.parent.mkdir(parents=True,exist_ok=True)
-    temp=Path(tempfile.mkdtemp(prefix=".worker-rootfs-",dir=output.parent))
+    output = output.absolute()
+    if output.exists():
+        raise ValueError("output must not exist")
+
+    # Verify every source before creating the rootfs. Only allowlisted paths
+    # are copied into the generated filesystem.
+    apple = extract_apple(apk, pins)
+    android = {}
+
+    for relative_path, expected_hash in pins["android_system"].items():
+        source = system / relative_path
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("missing Android artifact: " + relative_path)
+
+        data = source.read_bytes()
+        if digest(data) != expected_hash:
+            raise ValueError("unsupported Android artifact: " + relative_path)
+        if relative_path.startswith(("bin/", "lib64/")):
+            verify_elf(data, pins)
+        android[relative_path] = data
+
+    worker_data = worker.read_bytes()
+    verify_elf(worker_data, pins)
+
+    certificate_bundle = ca.read_bytes()
+    if b"-----BEGIN CERTIFICATE-----" not in certificate_bundle:
+        raise ValueError("invalid CA bundle")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary_root = Path(
+        tempfile.mkdtemp(prefix=".worker-rootfs-", dir=output.parent)
+    )
     try:
-        for rel,data in android.items():
-            path=temp/"system"/rel;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data);path.chmod(0o755 if rel.startswith("bin/") else 0o644)
-        for name,data in apple.items():
-            path=temp/"system/lib64"/name;path.write_bytes(data);path.chmod(0o644)
-        path=temp/"system/bin/apple-music-worker";path.write_bytes(executable);path.chmod(0o755)
-        for rel in ["proc","dev","tmp","data/data/com.apple.android.music/files/mpl_db","etc/ssl/certs"]:(temp/rel).mkdir(parents=True,exist_ok=True)
-        (temp/"tmp").chmod(0o1777)
-        (temp/"data/data/com.apple.android.music/files").chmod(0o700)
-        (temp/"etc/ssl/certs/ca-certificates.crt").write_bytes(certificate)
-        metadata = profile_metadata(pins, certificate)
-        (temp/"worker-profile.json").write_text(json.dumps(metadata, sort_keys=True)+"\n")
-        # No overwrite: mkdir reserves the destination before moving our verified files.
+        for relative_path, data in android.items():
+            destination = temporary_root / "system" / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+            destination.chmod(0o755 if relative_path.startswith("bin/") else 0o644)
+
+        for name, data in apple.items():
+            destination = temporary_root / "system/lib64" / name
+            destination.write_bytes(data)
+            destination.chmod(0o644)
+
+        worker_path = temporary_root / "system/bin/apple-music-worker"
+        worker_path.write_bytes(worker_data)
+        worker_path.chmod(0o755)
+
+        required_directories = (
+            "proc",
+            "dev",
+            "tmp",
+            "data/data/com.apple.android.music/files/mpl_db",
+            "etc/ssl/certs",
+        )
+        for relative_path in required_directories:
+            (temporary_root / relative_path).mkdir(parents=True, exist_ok=True)
+
+        (temporary_root / "tmp").chmod(0o1777)
+        (temporary_root / "data/data/com.apple.android.music/files").chmod(0o700)
+        (
+            temporary_root / "etc/ssl/certs/ca-certificates.crt"
+        ).write_bytes(certificate_bundle)
+
+        metadata = profile_metadata(pins, certificate_bundle)
+        (temporary_root / "worker-profile.json").write_text(
+            json.dumps(metadata, sort_keys=True) + "\n"
+        )
+
+        # mkdir reserves the destination and prevents silently overwriting it.
         output.mkdir()
-        for child in temp.iterdir():shutil.move(str(child),output/child.name)
-    finally:shutil.rmtree(temp)
+        for child in temporary_root.iterdir():
+            shutil.move(str(child), output / child.name)
+    finally:
+        shutil.rmtree(temporary_root)
+
+
 def main():
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--apk",type=Path,required=True)
-    p.add_argument("--arch",help="Android ABI or Linux architecture; default is native host")
-    p.add_argument("--android-system",type=Path,
-                   help="override bundled verified Android system binaries (bin/, lib64/, usr/)")
-    p.add_argument("--extract-libraries",type=Path,help="only extract verified Apple libraries into a new directory")
-    p.add_argument("--worker",type=Path)
-    p.add_argument("--output",type=Path)
-    p.add_argument("--ca-bundle",type=Path,default=Path("/etc/ssl/certs/ca-certificates.crt"))
-    a=p.parse_args()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--apk", type=Path, required=True)
+    parser.add_argument(
+        "--arch",
+        help="Android ABI or Linux architecture; defaults to the native host",
+    )
+    parser.add_argument(
+        "--android-system",
+        type=Path,
+        help="override bundled verified Android system binaries (bin/, lib64/, usr/)",
+    )
+    parser.add_argument(
+        "--extract-libraries",
+        type=Path,
+        help="extract only verified Apple libraries into a new directory",
+    )
+    parser.add_argument("--worker", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--ca-bundle",
+        type=Path,
+        default=Path("/etc/ssl/certs/ca-certificates.crt"),
+    )
+    args = parser.parse_args()
+
     try:
-        pins=load_profile(a.arch)
-        build=ROOT/"build"/pins["architecture"]
-        if a.extract_libraries:
-            files=extract_apple(a.apk,pins)
-            a.extract_libraries.mkdir(parents=True,exist_ok=False)
-            for name,data in files.items():(a.extract_libraries/name).write_bytes(data)
-            print("Extracted verified Apple Music build 1109 "+pins["architecture"]+" libraries.")
+        pins = load_profile(args.arch)
+        build_directory = ROOT / "build" / pins["architecture"]
+
+        if args.extract_libraries:
+            libraries = extract_apple(args.apk, pins)
+            args.extract_libraries.mkdir(parents=True, exist_ok=False)
+            for name, data in libraries.items():
+                (args.extract_libraries / name).write_bytes(data)
+            print(
+                "Extracted verified Apple Music build 1109 "
+                + pins["architecture"]
+                + " libraries."
+            )
             return
-        android_system=a.android_system or ROOT/"vendor/android-system"/pins["architecture"]
-        stage(a.apk,android_system,a.worker or build/"android/apple-music-worker",a.output or build/"rootfs",a.ca_bundle,pins)
-    except (ValueError,OSError,zipfile.BadZipFile) as e:p.exit(1,str(e)+"\n")
-    print("Staged verified "+pins["architecture"]+" rootfs; no account data included.")
-if __name__=="__main__":main()
+
+        android_system = (
+            args.android_system
+            or ROOT / "vendor/android-system" / pins["architecture"]
+        )
+        stage(
+            args.apk,
+            android_system,
+            args.worker or build_directory / "android/apple-music-worker",
+            args.output or build_directory / "rootfs",
+            args.ca_bundle,
+            pins,
+        )
+    except (ValueError, OSError, zipfile.BadZipFile) as error:
+        parser.exit(1, str(error) + "\n")
+
+    print("Staged verified " + pins["architecture"] + " rootfs; no account data included.")
+
+
+if __name__ == "__main__":
+    main()

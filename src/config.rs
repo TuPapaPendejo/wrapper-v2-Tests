@@ -18,9 +18,11 @@ pub struct Config {
     pub session_dir: String,
     pub device_info: String,
     pub dns: Vec<String>,
-    /// Optional Bearer token for direct HTTP API clients. Unset preserves 1.0.0 behavior.
+    /// Optional Bearer token for direct HTTP API clients.
+    /// Unset preserves 1.0.0 behavior.
     pub api_token: Option<Zeroizing<String>>,
-    /// Optional idle deadline for a pending 2FA challenge. None preserves the indefinite wait.
+    /// Optional idle deadline for a pending 2FA challenge.
+    /// None preserves the indefinite wait.
     pub challenge_timeout: Option<Duration>,
 }
 
@@ -91,7 +93,6 @@ impl Config {
         })
     }
 }
-
 
 fn read_api_token() -> Result<Option<Zeroizing<String>>, ApiError> {
     let value = match env::var("WRAPPER_API_TOKEN") {

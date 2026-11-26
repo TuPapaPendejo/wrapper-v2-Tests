@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn configured_api_token_requires_a_valid_bearer_header() {
         let token = "a".repeat(64);
-        let valid = header::HeaderValue::from_str(&format!("Bearer {token}")).unwrap();
+        let valid: header::HeaderValue = format!("Bearer {token}").parse().unwrap();
         assert!(bearer_token_matches(Some(&valid), Some(&token)));
         assert!(!bearer_token_matches(None, Some(&token)));
         assert!(!bearer_token_matches(

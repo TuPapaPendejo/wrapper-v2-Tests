@@ -468,6 +468,9 @@ impl Controller {
             // Native code only needs the framed IPC, not the login secrets.
             .env_remove("WRAPPER_USERNAME")
             .env_remove("WRAPPER_PASSWORD")
+            // HTTP-layer secrets and supervisor policy must not reach native code.
+            .env_remove("WRAPPER_API_TOKEN")
+            .env_remove("WRAPPER_2FA_TIMEOUT_SECONDS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
