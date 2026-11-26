@@ -37,10 +37,14 @@ pub struct Api {
 
 impl Api {
     pub fn new(config: &Config) -> Arc<Self> {
+        // Keep the API secret in the HTTP layer only. The supervisor never
+        // needs it, and its Config is the source of native-worker settings.
+        let mut supervisor_config = config.clone();
+        let api_token = supervisor_config.api_token.take();
         Arc::new(Self {
-            supervisor: Supervisor::new(config.clone()),
+            supervisor: Supervisor::new(supervisor_config),
             profile: config.profile.clone(),
-            api_token: config.api_token.clone(),
+            api_token,
             next_request_id: AtomicU64::new(1),
         })
     }
