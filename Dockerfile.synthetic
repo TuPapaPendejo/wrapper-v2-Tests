@@ -1,0 +1,45 @@
+# CI-only synthetic container. It deliberately contains no Apple APK or libraries.
+FROM debian:13.2 AS builder
+ARG RUST_VERSION=1.100.0
+ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup \
+    PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --fail --location --retry 3 --show-error --silent https://sh.rustup.rs \
+      | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION"
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY src ./src
+COPY profiles ./profiles
+RUN cargo +"$RUST_VERSION" build --release --locked
+
+FROM debian:13.2
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/wrapper
+COPY --from=builder /build/target/release/wrapperd /usr/local/bin/wrapperd
+COPY profiles /opt/wrapper/profiles
+COPY tools/architecture.py /opt/wrapper/tools/architecture.py
+COPY tests/mock_worker.py /opt/wrapper/tests/mock_worker.py
+COPY --chmod=0755 tests/container-mock-launcher.sh /usr/local/bin/worker-mock
+COPY tests/prepare_synthetic_container_rootfs.py /usr/local/bin/prepare-synthetic-rootfs
+RUN python3 -B /usr/local/bin/prepare-synthetic-rootfs \
+      --profile /opt/wrapper/profiles/apple-music-1109-x86_64.json \
+      --output /srv/wrapper/rootfs \
+    && chown -R 1000:1000 /srv/wrapper /opt/wrapper
+ENV WRAPPER_HOST=0.0.0.0 \
+    WRAPPER_PORT=80 \
+    WRAPPER_ARCH=x86_64 \
+    WRAPPER_LAUNCHER=/usr/local/bin/worker-mock \
+    WRAPPER_ROOTFS=/srv/wrapper/rootfs \
+    WRAPPER_DEVICE_INFO=a/b/c/d/e/f/g/h/i \
+    PYTHONDONTWRITEBYTECODE=1 \
+    RUST_LOG=info
+WORKDIR /srv/wrapper
+USER 1000:1000
+EXPOSE 80
+ENTRYPOINT ["/usr/local/bin/wrapperd"]
