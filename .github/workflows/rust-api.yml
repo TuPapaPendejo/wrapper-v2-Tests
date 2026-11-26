@@ -1,35 +1,51 @@
-name: Rust API
+name: Rust and native regression tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, audit/security-hardening]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   server:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin third-party actions to immutable commit SHAs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc
         with:
+          toolchain: 1.100.0
           components: clippy, rustfmt
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+
       - name: Rust formatting
         run: cargo fmt --check
+
+      - name: Rust lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Rust unit tests
+        run: cargo test --locked
+
+      - name: Native C++ protocol and launcher unit tests
+        run: |
+          cmake -S . -B build/ci-native -DWORKER_ARCH=x86_64
+          cmake --build build/ci-native --target common_tests worker-launch --parallel 2
+          ctest --test-dir build/ci-native --output-on-failure
+
       - name: Linux worker namespace and lifecycle tests
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror native/launcher.cpp -o /tmp/worker-launch
           sudo python3 tests/launcher_namespace.py /tmp/worker-launch -v
-      - name: Rust lint
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Rust unit tests
-        run: cargo test --locked
+
       - name: Build HTTP server for integration tests
         run: cargo build --locked
-      - name: Synthetic HTTP worker and APK staging tests
+
+      - name: Mock-backed HTTP worker and APK staging unit tests
         run: python -B -m unittest discover -s tests -p 'test_*.py' -v

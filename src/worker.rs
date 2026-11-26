@@ -364,10 +364,24 @@ impl Supervisor {
                         {
                             return Err(ApiError::worker_unavailable("login_client_closed"));
                         }
-                        // Waiting for an operator has no Wrapper-imposed
-                        // deadline. An empty code explicitly cancels login.
-                        let (code, continuation) = rx
-                            .await
+                        // The default remains indefinite for compatibility with
+                        // legitimate long-running 2FA. Operators may opt into an
+                        // idle deadline; expiry discards the native worker below.
+                        let answer = if let Some(idle_timeout) = self.settings.challenge_timeout {
+                            match timeout(idle_timeout, rx).await {
+                                Ok(answer) => answer,
+                                Err(_) => {
+                                    tracing::warn!(
+                                        event = "session.challenge_expired",
+                                        timeout_seconds = idle_timeout.as_secs()
+                                    );
+                                    return Err(ApiError::worker_unavailable("challenge_expired"));
+                                }
+                            }
+                        } else {
+                            rx.await
+                        };
+                        let (code, continuation) = answer
                             .map_err(|_| ApiError::worker_unavailable("challenge_expired"))?;
                         reply = Some(continuation);
                         timeout(
@@ -454,6 +468,9 @@ impl Controller {
             // Native code only needs the framed IPC, not the login secrets.
             .env_remove("WRAPPER_USERNAME")
             .env_remove("WRAPPER_PASSWORD")
+            // HTTP-layer secrets and supervisor policy must not reach native code.
+            .env_remove("WRAPPER_API_TOKEN")
+            .env_remove("WRAPPER_2FA_TIMEOUT_SECONDS")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

@@ -24,6 +24,8 @@ Detailed source findings and sanitized x86_64 evidence are in [the source audit]
 - Separate native workers and context-capture profiles for x86_64 and ARM64.
 - Persistent device identity and session storage.
 - Structured JSON logs with sanitized request metadata.
+- Optional HTTP Bearer authentication for direct API clients.
+- Optional idle expiry for abandoned two-factor challenges.
 - Private Docker image build with architecture-specific Android runtime files and verified Apple native-library inputs.
 
 ## Requirements
@@ -34,7 +36,7 @@ Detailed source findings and sanitized x86_64 evidence are in [the source audit]
 | Deployment | Docker Engine, Docker Compose plugin 2.24+, Buildx/BuildKit |
 | Build input | An authorized local Apple Music 3.6.0-beta, build 1109 package for the target ABI; standalone APK or supported split APKM |
 | Host tools | Git, Bash, coreutils, curl |
-| Build toolchains | Android NDK r23b, Rust, CMake, Ninja, and cross-compilers are installed inside Docker |
+| Build toolchains | Android NDK r23b, Rust 1.100.0, CMake, Ninja, and cross-compilers are installed inside Docker |
 
 The package version, manifests, architecture, and required Apple native libraries are pinned in the profiles. The build accepts a local package path; this repository does not provide the Apple Music package or direct users to a download source.
 
@@ -93,9 +95,31 @@ The 1.0.0 HTTP API is unversioned. Requests and responses use JSON; the native-w
 
 Playback and context requests are serialized through a single native worker. Concurrent requests may receive `503 worker_busy`. Eligible requests are retried internally after planned worker recycling.
 
+### Optional API authentication
+
+For direct HTTP clients, set `WRAPPER_API_TOKEN` in the private `.env` file. Generate a high-entropy value, for example:
+
+```bash
+openssl rand -hex 32
+```
+
+When configured, every route except `GET /health` requires an `Authorization: Bearer <token>` header. A missing or invalid token receives HTTP 401. When the variable is absent, the previous 1.0.0 API behavior is preserved. The token is loaded from the container environment, so users with Docker daemon access or permission to inspect the container can retrieve it; keep `.env` and Docker access restricted.
+
+Do not enable this option for a Gamdl deployment unless the installed client/provider is known to send the Bearer header to all protected routes. The default loopback-only deployment remains compatible without it. A Bearer token does not encrypt traffic; use TLS through an authenticated reverse proxy for remote access.
+
+### Optional 2FA idle timeout
+
+`WRAPPER_2FA_TIMEOUT_SECONDS` sets the maximum time to wait for a human challenge response. It accepts `1` through `86400` seconds. An absent value or `0` preserves the previous indefinite wait. For example:
+
+```dotenv
+WRAPPER_2FA_TIMEOUT_SECONDS=900
+```
+
+When the deadline expires, the pending challenge is cleared and the native worker is discarded so another login can start. Choose a value longer than the expected user interaction window; avoid a short value when using slow or remote 2FA approval.
+
 ## Security and operations
 
-**Do not expose the HTTP API directly to the Internet.** It has no built-in authentication or TLS, and `GET /session/credentials` returns sensitive session material. Keep the loopback binding, restrict Docker daemon access, and use an authenticated TLS gateway for deliberate remote access.
+**Do not expose the HTTP API directly to the Internet.** TLS is not built in. Unless `WRAPPER_API_TOKEN` is configured, the API also has no application-level authentication; `GET /session/credentials` returns sensitive session material. Keep the loopback binding, restrict Docker daemon access, and place deliberate remote access behind an authenticated TLS gateway.
 
 The container runs the HTTP process as a non-root UID, with a read-only filesystem and an init process. The native launcher temporarily requires `CAP_SYS_ADMIN` and `CAP_SYS_CHROOT` for namespaces, mounts, and chroot. The Compose profile also relaxes AppArmor; this is a deployment security trade-off documented by the current configuration and should not be copied into a more restrictive production policy without testing.
 
@@ -111,10 +135,13 @@ Run the source-level test suite from the repository root:
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
+cmake -S . -B build/ci-native -DWORKER_ARCH=x86_64
+cmake --build build/ci-native --target common_tests worker-launch --parallel 2
+ctest --test-dir build/ci-native --output-on-failure
 python3 -B -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-The HTTP integration tests use a synthetic worker; they do not exercise Apple's proprietary authentication path. Linux namespace tests require `unshare` and the relevant kernel permissions. The GitHub Actions workflow runs formatting, Clippy, Rust unit tests, namespace tests, and Python integration/staging tests. Passing those checks does not replace a live test against the pinned Apple Music build.
+HTTP and supervisor integration tests use a synthetic worker; they do not exercise Apple's proprietary authentication path. The native C++ CI step exercises the shared protocol and launcher tests, not the Apple-specific Android binary. Linux namespace tests require `unshare` and the relevant kernel permissions. GitHub Actions also pins the Rust toolchain and third-party action revisions. Fork repositories may need Actions enabled manually; this workflow supports both pushes to `audit/security-hardening` and manual dispatch so the draft branch can be tested without making its PR ready for review. Passing synthetic checks does not replace a live test against the pinned Apple Music build.
 
 Optional native-only developer workflows are available through `tools/build.sh` and `tools/build-local.sh`; they require their documented toolchains and are not necessary for the Docker build.
 

@@ -44,6 +44,15 @@ class StagingTests(unittest.TestCase):
                 path, pins = self.fixture(directory, abi=abi)
                 self.assertEqual(len(stage.extract_apple(path,pins)["libTest.so"]), 64)
 
+    def test_apkm_without_base_package_is_rejected(self):
+        profile = stage.load_profile("x86_64")
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "missing-base.apkm"
+            with zipfile.ZipFile(bundle, "w") as archive:
+                archive.writestr(profile["apk_split"], b"placeholder")
+            with self.assertRaisesRegex(ValueError, "missing or oversized base APK"):
+                stage.extract_apple(bundle, profile)
+
     def test_verified_apkm_bundle(self):
         for abi in ("x86_64", "arm64-v8a"):
             with self.subTest(abi=abi), tempfile.TemporaryDirectory() as directory:
@@ -97,6 +106,17 @@ class StagingTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 stage.stage(path, path, path, path, path)
             self.assertEqual(marker.read_text(), "untouched")
+
+    def test_staged_profile_records_the_exact_ca_bundle_digest(self):
+        profile = stage.load_profile("x86_64")
+        certificate_bundle = b"-----BEGIN CERTIFICATE-----\nsynthetic-fixture\n"
+        metadata = stage.profile_metadata(profile, certificate_bundle)
+        self.assertEqual(
+            metadata["ca_bundle_sha256"],
+            hashlib.sha256(certificate_bundle).hexdigest(),
+        )
+        self.assertEqual(metadata["profile"], profile["profile"])
+        self.assertNotIn("certificate", str(metadata).lower())
 
     def test_manifest_matches_runtime(self):
         import re

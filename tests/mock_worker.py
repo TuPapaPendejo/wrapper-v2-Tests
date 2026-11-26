@@ -53,6 +53,9 @@ def reply(id_, value=None, error=None, auth=None, restart_required=False, retrya
 
 def main():
     global session
+    for supervisor_only in ("WRAPPER_API_TOKEN", "WRAPPER_2FA_TIMEOUT_SECONDS"):
+        if supervisor_only in os.environ:
+            raise RuntimeError("supervisor-only configuration leaked to native worker")
     assert len(sys.argv) == 2
     budget = int(os.environ.get("WRAPPER_MOCK_BUDGET", "128"))
     operations = 0

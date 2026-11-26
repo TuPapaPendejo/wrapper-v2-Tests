@@ -14,6 +14,16 @@
   not establish ARM64 end-to-end support.
 - Correct the documented Android application build target to API 21, matching
   the pinned profile and CMake configuration.
+- Add opt-in HTTP Bearer authentication for direct API clients while preserving
+  the previous API behavior when no token is configured; keep `/health` public.
+- Add an opt-in 2FA idle timeout. Unset or zero preserves the existing indefinite
+  wait; an expired challenge clears pending state and discards the worker.
+- Record the SHA-256 identity of the CA bundle used to stage the Android rootfs
+  without embedding certificate contents or silently adding a new trust root.
+- Pin the Rust compiler used by the Docker builder and CI, pin GitHub Actions to
+  immutable commit SHAs, and run native C++ protocol/launcher unit tests in CI.
+- Document remaining reproducibility limits: the Debian base tag and APT package
+  repository state are not yet locked to immutable digests/snapshots.
 
 ## 1.0.0 — 2026-11-19
 

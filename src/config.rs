@@ -1,4 +1,6 @@
-use std::{env, net::IpAddr, path::PathBuf};
+use std::{env, net::IpAddr, path::PathBuf, time::Duration};
+
+use zeroize::Zeroizing;
 
 use crate::device_info;
 use crate::error::ApiError;
@@ -16,10 +18,18 @@ pub struct Config {
     pub session_dir: String,
     pub device_info: String,
     pub dns: Vec<String>,
+    /// Optional Bearer token for direct HTTP API clients.
+    /// Unset preserves 1.0.0 behavior.
+    pub api_token: Option<Zeroizing<String>>,
+    /// Optional idle deadline for a pending 2FA challenge.
+    /// None preserves the indefinite wait.
+    pub challenge_timeout: Option<Duration>,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, ApiError> {
+        let api_token = read_api_token()?;
+        let challenge_timeout = read_challenge_timeout()?;
         let profile = RuntimeProfile::select(
             &env::var("WRAPPER_ARCH").unwrap_or_else(|_| std::env::consts::ARCH.to_string()),
         )?;
@@ -78,6 +88,92 @@ impl Config {
             session_dir,
             device_info,
             dns,
+            api_token,
+            challenge_timeout,
         })
+    }
+}
+
+fn read_api_token() -> Result<Option<Zeroizing<String>>, ApiError> {
+    let value = match env::var("WRAPPER_API_TOKEN") {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(_) => return Err(ApiError::bad_config("WRAPPER_API_TOKEN")),
+    };
+    parse_api_token(value)
+}
+
+fn parse_api_token(value: Option<String>) -> Result<Option<Zeroizing<String>>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    // Hex/base64url-style tokens only; generate at least 256 bits of entropy.
+    if !(43..=256).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+    {
+        return Err(ApiError::bad_config("WRAPPER_API_TOKEN"));
+    }
+    Ok(Some(Zeroizing::new(value)))
+}
+
+fn read_challenge_timeout() -> Result<Option<Duration>, ApiError> {
+    let value = match env::var("WRAPPER_2FA_TIMEOUT_SECONDS") {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(_) => return Err(ApiError::bad_config("WRAPPER_2FA_TIMEOUT_SECONDS")),
+    };
+    parse_challenge_timeout(value.as_deref())
+}
+
+fn parse_challenge_timeout(value: Option<&str>) -> Result<Option<Duration>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| ApiError::bad_config("WRAPPER_2FA_TIMEOUT_SECONDS"))?;
+    match seconds {
+        0 => Ok(None),
+        1..=86_400 => Ok(Some(Duration::from_secs(seconds))),
+        _ => Err(ApiError::bad_config("WRAPPER_2FA_TIMEOUT_SECONDS")),
+    }
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn api_token_is_optional_but_validated_when_configured() {
+        assert!(parse_api_token(None).unwrap().is_none());
+        assert_eq!(
+            parse_api_token(Some("a".repeat(64)))
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "a".repeat(64)
+        );
+        assert!(parse_api_token(Some(String::new())).is_err());
+        assert!(parse_api_token(Some("short".to_string())).is_err());
+        assert!(parse_api_token(Some("a".repeat(257))).is_err());
+        assert!(parse_api_token(Some(
+            "contains spaces ................................".to_string()
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn two_factor_timeout_is_opt_in_and_bounded() {
+        assert_eq!(parse_challenge_timeout(None).unwrap(), None);
+        assert_eq!(parse_challenge_timeout(Some("0")).unwrap(), None);
+        assert_eq!(
+            parse_challenge_timeout(Some("900")).unwrap(),
+            Some(Duration::from_secs(900))
+        );
+        assert!(parse_challenge_timeout(Some("-1")).is_err());
+        assert!(parse_challenge_timeout(Some("86401")).is_err());
+        assert!(parse_challenge_timeout(Some("invalid")).is_err());
     }
 }

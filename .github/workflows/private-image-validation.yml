@@ -1,0 +1,172 @@
+name: Private x86_64 image validation
+
+on:
+  push:
+    branches:
+      - audit/security-hardening
+
+permissions:
+  contents: read
+
+jobs:
+  private-production-image:
+    # Never expose the package URL to pull_request or pull_request_target workflows.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/audit/security-hardening' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      runtime_validation_failed: ${{ steps.finalize-production-validation.outputs.runtime_validation_failed }}
+    env:
+      WRAPPER_IMAGE: wrapper-v2:private-ci-${{ github.run_id }}
+      WRAPPER_PRODUCTION_IMAGE: wrapper-v2:private-ci-${{ github.run_id }}
+      WRAPPER_PRODUCTION_CONTAINER: wrapper-private-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify private build gate
+        shell: bash
+        env:
+          ENABLE_PRIVATE_APPLE_BUILD: ${{ vars.ENABLE_PRIVATE_APPLE_BUILD }}
+        run: |
+          set -euo pipefail
+          if [[ "${ENABLE_PRIVATE_APPLE_BUILD:-}" != "true" ]]; then
+            echo "::error::Repository variable ENABLE_PRIVATE_APPLE_BUILD must be exactly 'true' and visible to this workflow."
+            exit 1
+          fi
+          echo "Private production build gate is enabled."
+
+      - name: Verify private package source is configured
+        shell: bash
+        env:
+          APPLE_PACKAGE_URL: ${{ secrets.APPLE_PACKAGE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_PACKAGE_URL:-}" ]]; then
+            echo "::error::APPLE_PACKAGE_URL is not configured as a repository Actions secret."
+            exit 1
+          fi
+          case "$APPLE_PACKAGE_URL" in
+            https://*) ;;
+            *)
+              echo "::error::APPLE_PACKAGE_URL must use HTTPS."
+              exit 1
+              ;;
+          esac
+          echo "Private package URL secret is present; its value is withheld."
+
+      - name: Download authorized package to ephemeral runner storage
+        shell: bash
+        env:
+          APPLE_PACKAGE_URL: ${{ secrets.APPLE_PACKAGE_URL }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/AppleMusic.package"
+          rm -f -- "$archive"
+          metadata="$RUNNER_TEMP/AppleMusic.transfer"
+          headers="$RUNNER_TEMP/AppleMusic.headers"
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 1200 \
+            --max-filesize 1073741824 --proto '=https' --proto-redir '=https' \
+            --dump-header "$headers" \
+            --write-out '%{http_code}\n%{content_type}\n%{size_download}\n%{url_effective}\n' \
+            --output "$archive" "$APPLE_PACKAGE_URL" > "$metadata"
+          python3 - "$archive" "$metadata" <<'PY'
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          import sys
+          import zipfile
+
+          archive = Path(sys.argv[1])
+          metadata_path = Path(sys.argv[2])
+
+          def report_safe_metadata() -> None:
+              try:
+                  code, content_type, size, effective_url = metadata_path.read_text().splitlines()[:4]
+                  host = urlsplit(effective_url).hostname or "unknown"
+                  print(
+                      f"Safe download diagnostics: HTTP={code}; "
+                      f"Content-Type={content_type[:160]}; bytes={size}; final-host={host}"
+                  )
+              except (OSError, ValueError):
+                  print("Safe download diagnostics: response metadata unavailable.")
+
+          if not archive.is_file() or not 1024 <= archive.stat().st_size <= 1073741824:
+              report_safe_metadata()
+              raise SystemExit("Downloaded package is empty or outside the 1 KiB–1 GiB size policy.")
+          if not zipfile.is_zipfile(archive):
+              report_safe_metadata()
+              raise SystemExit("Downloaded package is not a valid APK/APKM ZIP container.")
+          with zipfile.ZipFile(archive) as package:
+              if package.testzip() is not None:
+                  raise SystemExit("Downloaded APK/APKM contains a corrupt ZIP member.")
+          PY
+          echo "Package downloaded and ZIP integrity preflight passed."
+
+      - name: Build private production image for x86_64
+        id: build_production
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/build-docker.sh "$RUNNER_TEMP/AppleMusic.package" --arch x86_64
+          rm -f -- "$RUNNER_TEMP/AppleMusic.package"
+
+      - name: Run production image and native-worker smoke test
+        id: smoke_production
+        if: ${{ steps.build_production.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: python3 -B tests/test_production_container_smoke.py
+
+      - name: Finalize production runtime validation result
+        id: finalize-production-validation
+        if: always()
+        shell: bash
+        env:
+          BUILD_OUTCOME: ${{ steps.build_production.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke_production.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_OUTCOME" == "failure" || "$SMOKE_OUTCOME" == "failure" ]]; then
+            echo "runtime_validation_failed=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Production Docker build or native-worker smoke test failed."
+            exit 1
+          fi
+          echo "runtime_validation_failed=false" >> "$GITHUB_OUTPUT"
+          echo "No production runtime failure occurred; synthetic fallback is not warranted."
+
+      - name: Remove private package, container, images, and BuildKit cache
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker rm --force "$WRAPPER_PRODUCTION_CONTAINER" >/dev/null 2>&1
+          docker image rm --force "$WRAPPER_IMAGE" wrapper-v2:local >/dev/null 2>&1
+          docker buildx prune --all --force >/dev/null 2>&1
+          rm -f -- "$RUNNER_TEMP/AppleMusic.package" "$RUNNER_TEMP/AppleMusic.transfer" "$RUNNER_TEMP/AppleMusic.headers"
+          exit 0
+
+  synthetic-fallback:
+    name: Synthetic Docker fallback (only after production validation failure)
+    needs: private-production-image
+    if: ${{ always() && needs.private-production-image.result == 'failure' && needs.private-production-image.outputs.runtime_validation_failed == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      WRAPPER_SYNTHETIC_IMAGE: wrapper-v2:synthetic-fallback-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build CI-only synthetic Docker image (fallback)
+        run: docker build --pull --file Dockerfile.synthetic --tag "$WRAPPER_SYNTHETIC_IMAGE" .
+
+      - name: Run synthetic HTTP and lifecycle tests
+        env:
+          WRAPPER_RUN_CONTAINER_SMOKE: "1"
+        run: python3 -B tests/test_container_smoke.py
+
+      - name: Remove fallback synthetic image
+        if: always()
+        run: docker image rm --force "$WRAPPER_SYNTHETIC_IMAGE" || true

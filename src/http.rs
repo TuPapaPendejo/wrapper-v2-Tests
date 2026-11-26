@@ -31,14 +31,20 @@ type HttpResponse = Response<Full<Bytes>>;
 pub struct Api {
     supervisor: Arc<Supervisor>,
     profile: RuntimeProfile,
+    api_token: Option<Zeroizing<String>>,
     next_request_id: AtomicU64,
 }
 
 impl Api {
     pub fn new(config: &Config) -> Arc<Self> {
+        // Keep the API secret in the HTTP layer only. The supervisor never
+        // needs it, and its Config is the source of native-worker settings.
+        let mut supervisor_config = config.clone();
+        let api_token = supervisor_config.api_token.take();
         Arc::new(Self {
-            supervisor: Supervisor::new(config.clone()),
+            supervisor: Supervisor::new(supervisor_config),
             profile: config.profile.clone(),
+            api_token,
             next_request_id: AtomicU64::new(1),
         })
     }
@@ -125,6 +131,14 @@ impl Api {
                 StatusCode::OK,
                 json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}),
             ));
+        }
+        if requires_authentication(path, &method)
+            && !bearer_token_matches(
+                parts.headers.get(header::AUTHORIZATION),
+                self.api_token.as_deref().map(String::as_str),
+            )
+        {
+            return Err(ApiError::simple("unauthorized", StatusCode::UNAUTHORIZED));
         }
         if parts.uri.to_string().len() > QUERY_LIMIT {
             return Err(ApiError::bad_request("request_target_too_large"));
@@ -241,6 +255,46 @@ impl Api {
     }
 }
 
+fn requires_authentication(path: &str, method: &Method) -> bool {
+    !(path == "/health" && *method == Method::GET)
+}
+
+fn bearer_token_matches(
+    authorization: Option<&header::HeaderValue>,
+    expected: Option<&str>,
+) -> bool {
+    let Some(expected) = expected else {
+        // No configured API token preserves the existing 1.0.0 client contract.
+        return true;
+    };
+    let Some(value) = authorization.and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    let Some((scheme, supplied)) = value.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("Bearer")
+        || supplied.is_empty()
+        || supplied.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return false;
+    }
+    token_bytes_match(expected.as_bytes(), supplied.as_bytes())
+}
+
+// Compare every byte in the longer value rather than returning on the first
+// mismatching byte. The token's length is public configuration; no token values
+// are ever logged or returned in an error response.
+fn token_bytes_match(expected: &[u8], supplied: &[u8]) -> bool {
+    let mut difference = expected.len() ^ supplied.len();
+    for index in 0..expected.len().max(supplied.len()) {
+        let left = expected.get(index).copied().unwrap_or_default();
+        let right = supplied.get(index).copied().unwrap_or_default();
+        difference |= usize::from(left ^ right);
+    }
+    difference == 0
+}
+
 fn log_route(path: &str) -> &'static str {
     match path {
         "/health" => "/health",
@@ -262,12 +316,18 @@ fn answer(status: StatusCode, mut payload: Value) -> HttpResponse {
     let bytes = serde_json::to_vec(&payload)
         .unwrap_or_else(|_| b"{\"error\":{\"code\":\"internal_error\"}}".to_vec());
     wipe_json_value(&mut payload);
-    Response::builder()
+    let builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header("content-security-policy", "default-src 'none'")
+        .header("content-security-policy", "default-src 'none'");
+    let builder = if status == StatusCode::UNAUTHORIZED {
+        builder.header(header::WWW_AUTHENTICATE, "Bearer")
+    } else {
+        builder
+    };
+    builder
         .body(Full::new(Bytes::from(bytes)))
         .expect("static response headers")
 }
@@ -377,6 +437,48 @@ mod tests {
         assert!(validate_key_uri("skd://bad\n").is_err());
         assert!(validate_key_uri("skd://valid-key").is_ok());
     }
+    #[test]
+    fn api_token_is_optional_for_backward_compatibility() {
+        assert!(bearer_token_matches(None, None));
+        assert!(bearer_token_matches(
+            Some(&header::HeaderValue::from_static(
+                "Bearer ignored-for-legacy-mode"
+            )),
+            None
+        ));
+    }
+
+    #[test]
+    fn configured_api_token_requires_a_valid_bearer_header() {
+        let token = "a".repeat(64);
+        let valid: header::HeaderValue = format!("Bearer {token}").parse().unwrap();
+        assert!(bearer_token_matches(Some(&valid), Some(&token)));
+        assert!(!bearer_token_matches(None, Some(&token)));
+        assert!(!bearer_token_matches(
+            Some(&header::HeaderValue::from_static("Basic abc")),
+            Some(&token)
+        ));
+        assert!(!bearer_token_matches(
+            Some(&header::HeaderValue::from_static("Bearer wrong")),
+            Some(&token)
+        ));
+        assert!(!bearer_token_matches(
+            Some(&header::HeaderValue::from_static("Bearer")),
+            Some(&token)
+        ));
+    }
+
+    #[test]
+    fn only_health_liveness_is_public_when_token_authentication_is_enabled() {
+        assert!(!requires_authentication("/health", &Method::GET));
+        assert!(requires_authentication("/health", &Method::POST));
+        assert!(requires_authentication("/info", &Method::GET));
+        assert!(requires_authentication(
+            "/session/credentials",
+            &Method::GET
+        ));
+    }
+
     #[test]
     fn log_routes_never_include_untrusted_request_paths() {
         assert_eq!(log_route("/context"), "/context");

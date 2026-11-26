@@ -36,6 +36,8 @@ class AutoAuthTests(unittest.TestCase):
         self.env = dict(os.environ)
         self.env.pop("WRAPPER_USERNAME", None)
         self.env.pop("WRAPPER_PASSWORD", None)
+        self.env.pop("WRAPPER_API_TOKEN", None)
+        self.env.pop("WRAPPER_2FA_TIMEOUT_SECONDS", None)
         self.env.update(WRAPPER_HOST="127.0.0.1", WRAPPER_PORT=str(self.port),
                         WRAPPER_ARCH="x86_64", WRAPPER_ROOTFS=str(root),
                         WRAPPER_LAUNCHER=str(launch),
@@ -244,6 +246,43 @@ class AutoAuthTests(unittest.TestCase):
         self.assertEqual(self.request("POST", "/session/challenge",
                                       {"challenge_id":challenge["challenge_id"],
                                        "code":"123456"})[0], 200)
+
+    def test_abandoned_two_factor_challenge_expires_when_configured(self):
+        self.env.update(
+            WRAPPER_USERNAME="twofactor",
+            WRAPPER_PASSWORD="some-password",
+            WRAPPER_MOCK_NO_CACHED_SESSION="1",
+            WRAPPER_2FA_TIMEOUT_SECONDS="1",
+        )
+        self.launch()
+        self.wait_for(
+            lambda: any(e.get("event") == "session.auto_auth_2fa_required"
+                        for e in self.events())
+        )
+        self.wait_for(
+            lambda: any(e.get("event") == "session.challenge_expired"
+                        for e in self.events()),
+            timeout=5,
+        )
+        self.wait_for(
+            lambda: self.request("GET", "/session/challenge")[0] == 404,
+            timeout=5,
+        )
+        self.wait_for(lambda: self.request("GET", "/session")[0] == 200)
+        self.assertEqual(self.request("GET", "/session")[1]["state"], "logged_out")
+        # A timed-out challenge must release the single-worker lock. Remove
+        # the test deadline so the follow-up challenge cannot race its expiry.
+        self.env.pop("WRAPPER_2FA_TIMEOUT_SECONDS", None)
+        status, challenge = self.request(
+            "POST", "/session/login",
+            {"username": "twofactor", "password": "dummy"},
+        )
+        self.assertEqual(status, 202)
+        self.assertEqual(
+            self.request("POST", "/session/challenge",
+                         {"challenge_id": challenge["challenge_id"], "code": ""})[0],
+            502,
+        )
 
     def test_incomplete_credentials_fail_closed(self):
         self.env.update(WRAPPER_USERNAME="unique-config-secret")

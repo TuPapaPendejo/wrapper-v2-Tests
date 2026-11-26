@@ -1,14 +1,18 @@
 # syntax=docker/dockerfile:1.7
 #
-# Build *all* executables and the complete Android runtime in Docker.
-# The Apple Music APK is passed in an isolated BuildKit named context and
-# bind-mounted for extraction, without copying the raw archive into a layer.
-# The resulting image intentionally CONTAINS proprietary Apple libraries:
-# build and use privately; do not publish or redistribute this image.
+# Build all executables and the Android runtime inside Docker.
+# The operator supplies the Apple Music package through an isolated BuildKit
+# named context; the raw archive is not copied into an image layer.
+# The final image contains extracted proprietary Apple libraries and must
+# remain private. Do not publish or redistribute it.
 #
-# Android NDK r23b ships an x86-64 Linux host toolchain. Even when producing
-# ARM64 images, compilation therefore runs on linux/amd64.
+# Android NDK r23b provides an x86-64 Linux host toolchain, including for
+# ARM64-target builds.
+ARG RUST_VERSION=1.100.0
 FROM --platform=linux/amd64 debian:13.2 AS builder
+ARG RUST_VERSION
+ARG TARGETARCH
+ARG APPLE_APK_SHA256
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ANDROID_NDK_HOME=/opt/android-ndk-r23b \
@@ -16,13 +20,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/root/.rustup \
     PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+WORKDIR /work
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates curl unzip python3 cmake ninja-build git \
        build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
-# Official Android NDK Linux archive with its Google SDK repository SHA-1 pin.
+# Official Android NDK r23b archive, checked against Google's repository hash.
 RUN curl --fail --location --retry 3 --output /tmp/android-ndk.zip \
       https://dl.google.com/android/repository/android-ndk-r23b-linux.zip \
     && echo 'f47ec4c4badd11e9f593a8450180884a927c330d  /tmp/android-ndk.zip' | sha1sum -c - \
@@ -30,19 +36,17 @@ RUN curl --fail --location --retry 3 --output /tmp/android-ndk.zip \
     && rm -f /tmp/android-ndk.zip \
     && grep -q 'Pkg.Revision = 23.1.7779620' /opt/android-ndk-r23b/source.properties
 
+# The exact Rust compiler version is shared with CI through rust-toolchain.toml.
 RUN curl --fail --location --retry 3 --show-error --silent https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --default-toolchain stable \
-    && rustup target add aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu
+      | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION" \
+    && rustup target add --toolchain "$RUST_VERSION" aarch64-unknown-linux-gnu
 
-# Share the expensive toolchain installation between both Docker targets.
-ARG TARGETARCH
-ARG APPLE_APK_SHA256
-WORKDIR /work
-# .dockerignore explicitly allowlists these source files and the public Android
-# runtime. It excludes local APKs, build results, .env, and cached sessions.
+# .dockerignore allowlists source, tests, profiles, and verified public Android
+# runtime files. It excludes local packages, credentials, sessions, and output.
 COPY . .
 
-# The APK's digest is also a cache key. No password or session is supplied.
+# The whole-input digest is a BuildKit hand-off/cache check, not a trusted
+# package-origin signature. Staging validates manifests and extracted libraries.
 RUN --mount=type=bind,from=apple_apk,source=AppleMusic.package,target=/run/apple-music.package,readonly \
     set -eu; \
     test -n "$APPLE_APK_SHA256"; \
@@ -87,11 +91,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc ;; \
       *) exit 1 ;; \
     esac; \
-    cargo build --release --locked --target "$target"
+    cargo +"$RUST_VERSION" build --release --locked --target "$target"
 
-# Rootfs staging deliberately happens only after successful compilation and
-# uses the verified vendored Android files plus the private extracted Apple
-# libraries. Never copy accounts, preexisting rootfs, or session state.
+# Stage only after successful compilation and validation; never include account
+# data, preexisting root filesystems, or session state.
 RUN --mount=type=bind,from=apple_apk,source=AppleMusic.package,target=/run/apple-music.package,readonly \
     set -eu; \
     case "$TARGETARCH" in \
@@ -113,6 +116,7 @@ RUN --mount=type=bind,from=apple_apk,source=AppleMusic.package,target=/run/apple
     install -m 755 "target/$target/release/wrapperd" /opt/wrapper/wrapperd
 
 FROM debian:13.2
+ARG RUST_VERSION
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libcap2-bin curl \
     && rm -rf /var/lib/apt/lists/*
@@ -128,7 +132,8 @@ RUN setcap cap_sys_admin,cap_sys_chroot+ep /usr/local/bin/worker-launch
 
 LABEL org.opencontainers.image.title="Wrapper-v2" \
       org.opencontainers.image.version="1.0.0" \
-      org.opencontainers.image.description="Private, self-built Temari-compatible Apple Music context provider"
+      org.opencontainers.image.description="Private, self-built Temari-compatible Apple Music context provider" \
+      org.opencontainers.image.rust.version="$RUST_VERSION"
 
 ENV WRAPPER_HOST=0.0.0.0 \
     WRAPPER_PORT=80 \

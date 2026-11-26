@@ -42,6 +42,8 @@ async fn serve() -> Result<(), error::ApiError> {
         host = %settings.host,
         port = settings.port,
     );
+    // The API retains its own zeroizing token; release the startup copy now.
+    drop(settings);
     if let Some(credentials) = credentials {
         let supervisor = api.supervisor();
         tokio::spawn(async move {
