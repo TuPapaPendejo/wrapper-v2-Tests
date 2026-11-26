@@ -48,6 +48,8 @@ class ServerContract(unittest.TestCase):
                    WRAPPER_LAUNCHER=str(cls.launcher),
                    WRAPPER_ROOTFS=str(directory),
                    WRAPPER_DEVICE_INFO="a/b/c/d/e/f/g/h/i", RUST_LOG="info")
+        env.pop("WRAPPER_API_TOKEN", None)
+        env.pop("WRAPPER_2FA_TIMEOUT_SECONDS", None)
         if cls.api_token is not None:
             env["WRAPPER_API_TOKEN"] = cls.api_token
         cls.log_path = directory / "wrapper.jsonl"
@@ -218,6 +220,7 @@ class ServerContract(unittest.TestCase):
                 401,
             )
             self.assertEqual(self.request("GET", "/session")[0], 200)
+            self.assertNotIn(self.api_token, self.log_path.read_text())
 
     def test_08_logs_are_jsonl_and_do_not_contain_request_secrets(self):
         secret = "private-nonlogging-marker-0123456789"

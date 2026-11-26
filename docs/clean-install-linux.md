@@ -142,7 +142,9 @@ curl.exe -fsS http://127.0.0.1:8080/health
 
 Configure Gamdl to use Wrapper as its authentication provider and supply the endpoint when prompted. Complete Apple Account login and any 2FA challenge in the client. Keep the WSL distribution, Docker daemon, and Wrapper container running while Gamdl uses the service.
 
-If Windows cannot reach the endpoint, check WSL localhost forwarding and the Compose port mapping first. Do not expose the unauthenticated HTTP service on all host interfaces as a workaround.
+If Windows cannot reach the endpoint, check WSL localhost forwarding and the Compose port mapping first. Do not expose the HTTP service on all host interfaces as a workaround.
+
+For the standard Gamdl arrangement, leave `WRAPPER_API_TOKEN` unset unless you have verified that the selected Gamdl authentication provider sends the required Bearer header to every protected endpoint. The default configuration preserves the existing client contract.
 
 ## 8. Expected authentication and runtime sequence
 
@@ -180,11 +182,40 @@ docker compose down -v
 
 The `-v` option removes the Compose-managed named volume. Never use it as a routine update command. For installations using the legacy `WRAPPER_DATA_DIR=./data` bind mount, preserve that directory and its original `WRAPPER_DEVICE_INFO`; do not silently switch to the named volume.
 
-## 10. Security
+## 10. Optional security controls
 
-- Keep the host binding on loopback. The HTTP API has no built-in authentication or TLS.
-- Do not expose port 8080 directly to the Internet; use a separately authenticated TLS gateway for deliberate remote access.
-- Treat Docker daemon access, the session volume, `.env`, and operational logs as sensitive.
+### Bearer authentication for direct API clients
+
+Create a high-entropy token:
+
+```bash
+openssl rand -hex 32
+```
+
+Put the value in the private `.env` file:
+
+```dotenv
+WRAPPER_API_TOKEN=<generated-token>
+```
+
+When configured, every endpoint except `GET /health` requires an `Authorization: Bearer <token>` header. Missing or invalid tokens receive HTTP 401. The token is loaded from container environment configuration, so Docker administrators and users who can inspect the container can read it. Protect the environment file and Docker daemon.
+
+The option is disabled when the variable is absent, preserving existing behavior. Do not enable it for Gamdl unless its configured provider is confirmed to supply the header to every protected route. The token is not TLS: use an authenticated TLS gateway for remote access and do not expose port 8080 directly to the Internet.
+
+### Expiring abandoned 2FA challenges
+
+By default, a challenge has no Wrapper-imposed deadline. To set an idle deadline, add a value from 1 to 86400 seconds:
+
+```dotenv
+WRAPPER_2FA_TIMEOUT_SECONDS=900
+```
+
+Use `0` or omit the setting to preserve the indefinite wait. On expiry, Wrapper clears the pending challenge and discards the native worker; a new login may then be started. Set a duration that accommodates the expected human response time.
+
+### Deployment hygiene
+
+- Keep the host binding on loopback.
+- Treat Docker daemon access, the session volume, `.env`, API tokens, and operational logs as sensitive.
 - Do not commit the Apple Music package, extracted proprietary libraries, credentials, or session state.
 - Do not publish or redistribute the locally built image: it contains extracted proprietary Apple libraries.
 - Keep the generated device identity paired with its session volume across restarts and image upgrades.

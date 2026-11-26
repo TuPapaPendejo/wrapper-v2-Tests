@@ -4,6 +4,8 @@
 
 - Repository: `TuPapaPendejo/wrapper-v2-Tests`
 - Reviewed baseline: `main` at `9a6f29f493b1bac5325105ab6edf5dbd8caaae8c`
+- Remediation baseline: `fix/device-info-apple-auth-1109` at `6918066e51926427c133230ececae6154d4d70dd`
+- Follow-up branch: `audit/security-hardening` (draft PR; not merged into the authentication branch or `main`)
 - Scope: Rust HTTP API and supervisor; native C++ worker, session and playback
   paths; x86-64 and ARM64 context-capture hooks; launcher and namespaces;
   runtime profiles and binary pins; APK/APKM staging; Docker/Compose; tests,
@@ -35,12 +37,12 @@
    value can make an existing Apple Music cache unusable. The patch changes
    only identities generated for new installations and explicitly tests that
    an existing 1.0.0 identity is left byte-for-byte unchanged.
-3. **The API is not an internet-facing authenticated service.** There is no
-   built-in HTTP authentication or TLS. In particular,
-   `GET /session/credentials` exports session tokens. Compose publishes the
-   host port on loopback by default; changing that binding or exposing the
-   container port without an authenticated TLS gateway exposes account
-   material and session-control operations.
+3. **The API has no TLS and its Bearer authentication is opt-in.** The
+   follow-up adds `WRAPPER_API_TOKEN`; when configured, all routes except
+   `GET /health` require a Bearer token. When unset, legacy 1.0.0 behavior is
+   intentionally preserved, so the API remains unauthenticated at application
+   level. `GET /session/credentials` exports session tokens. Keep the default
+   loopback binding or use an authenticated TLS gateway for remote access.
 4. **The native implementation is highly version- and ABI-specific by design.**
    Symbols, object layouts, linker behavior, capture hook addresses, register
    states, byte offsets and expected context sizes are coupled to exact
@@ -104,13 +106,24 @@ Android platform 21. The requirement table now reports API 21 for both ABIs.
 ### F-03 — Unauthenticated HTTP API and credential export
 
 **Severity:** High if reachable by an untrusted client  
-**Status:** Existing documented design limitation; no protocol change made.
+**Status:** Partially remediated with an opt-in Bearer control; TLS remains external.
 
-The HTTP service has no authentication middleware or TLS termination.
-`GET /session/credentials` returns developer and media-user tokens; login,
-session close, playback and context routes are also directly callable.
-Compose's published port is bound to `127.0.0.1` by default, and the README
-warns against exposing the service directly.
+`WRAPPER_API_TOKEN` is now parsed as a bounded, restricted-character secret.
+When configured, every route except `GET /health` requires
+`Authorization: Bearer <token>`; missing or invalid values receive HTTP 401.
+The token is held in `Zeroizing<String>`, is not logged, and is never passed to
+the native worker. Tests cover legacy mode, valid and invalid headers, and the
+public health route.
+
+**Compatibility choice:** when `WRAPPER_API_TOKEN` is absent, the existing
+1.0.0 no-auth API behavior remains unchanged. This is necessary to avoid
+silently breaking current clients. The optional token therefore does not make
+a default deployment authenticated. `GET /session/credentials` still exports
+developer and media-user tokens, and Docker administrators can inspect
+container environment variables. Keep the loopback binding, protect
+`.env`/Docker access, and use an authenticated TLS gateway for deliberate
+remote access. Do not assume a client such as Gamdl can send this custom header
+unless its configured provider has been tested.
 
 **Operational control:** keep the host binding on loopback, do not publish the
 container port to an untrusted network, restrict Docker/network access, and
@@ -121,17 +134,16 @@ authentication when other tenants or workloads can join it.
 ### F-04 — Human 2FA wait has no server-side deadline
 
 **Severity:** Medium when an untrusted client can reach the API  
-**Status:** Deliberate behavior, retained to avoid expiring legitimate 2FA.
+**Status:** Partially remediated with an opt-in idle timeout; indefinite wait remains the default.
 
-The Rust supervisor holds the single-worker lock while waiting for a human
-challenge response. The native protocol pauses its operation timer only during
-that wait. This prevents a short fixed timeout from killing a valid interactive
-login, but also means one abandoned challenge can keep the worker occupied and
-cause other worker-dependent calls to return `503 worker_busy`.
-
-**Operational control:** restrict access to the API and cancel abandoned
-challenges with an empty code. A future configurable idle timeout would need
-explicit product behavior and regression tests for long-running 2FA.
+`WRAPPER_2FA_TIMEOUT_SECONDS` accepts 1–86400 seconds. An absent value or
+`0` preserves the previous indefinite wait to avoid breaking slow or
+legitimate human approval. When set, expiry clears the pending challenge,
+emits `session.challenge_expired` with only the configured duration, discards
+the native worker, and releases the single-worker lock. The synthetic
+auto-auth test covers expiry, pending-challenge removal, logged-out state, and
+the ability to start a subsequent login. A live Apple 2FA timeout was not
+tested.
 
 ### F-05 — Native ABI and capture hooks are pinned to exact binary layouts
 
@@ -148,42 +160,49 @@ prefixes before use; profile metadata and HTTP response contracts validate
 captured context sizes.
 
 These guards are valuable: do not relax them to make a different APK appear
-compatible. Any Apple Music version, library, NDK, Dobby, linker or ABI change
-must be treated as a separate reverse-engineering target and tested on both
-architectures. A successful compile alone does not prove that native object
-sizes or capture state are correct.
+compatible. The follow-up CI now builds and runs the host-side C++ protocol and
+launcher unit tests in addition to Rust and Python tests. This does not compile
+or execute the proprietary Apple Android worker in the CI runner. Any Apple
+Music version, library, NDK, Dobby, linker or ABI change remains a separate
+reverse-engineering target requiring validation on both architectures. A
+successful compile alone does not prove that native object sizes or capture
+state are correct.
 
 ### F-06 — CI does not exercise the proprietary Apple authentication path
 
 **Severity:** Medium  
 **Status:** Test-environment limitation.
 
-The current workflow builds the Rust API and launcher, runs Rust/C++ unit
-tests, Linux namespace tests, and Python integration tests using
-`tests/mock_worker.py`. APK staging tests use synthetic archives. The
-workflow does not receive the proprietary APKM or Apple credentials and does
-not execute the native Apple libraries.
+The follow-up workflow pins checkout/setup-python actions to immutable
+commit SHAs and uses Rust 1.100.0 for formatting, Clippy, and unit tests. It
+adds CMake/CTest execution of `common_tests` and `worker-launch`, retains the
+Linux namespace lifecycle test, and runs the synthetic HTTP, supervisor,
+staging, and environment-control tests. The staging fixtures remain synthetic.
 
-Consequently, green CI can validate the HTTP/supervisor contracts but cannot
-confirm `AuthenticateFlow`, live 2FA, token validation, playback, or actual
-Temari context capture. Keep real-device tests private and report their
-architecture, APKM digest, profile, and sanitized result separately.
+The workflow does not receive the proprietary Apple package or Apple
+credentials and does not execute the native Apple libraries. Green CI can
+validate shared Rust, HTTP, protocol, launcher, and staging contracts; it
+cannot confirm `AuthenticateFlow`, live 2FA, cached-token validation,
+playback, or actual Temari context capture. Private real-runtime tests remain
+necessary for those paths.
 
 ### F-07 — Builder inputs are not fully reproducible
 
 **Severity:** Medium for supply-chain/rebuild reproducibility  
-**Status:** Not changed in this authentication patch.
+**Status:** Partially remediated; Docker base and APT remain mutable.
 
-The Android NDK archive is checksum-verified and external native source
-dependencies are pinned to Git commits. However, the Docker base image is
-referenced by a mutable tag, Debian packages are installed from the current
-repository state, and Rust is installed using the moving `stable` channel.
-Two builds from the same source commit can therefore use different build
-toolchains or base layers over time.
+The follow-up pins the Rust toolchain to 1.100.0 in
+`rust-toolchain.toml` and the Docker build. GitHub Actions now pins the
+checkout, Rust-toolchain action, and setup-python action to immutable commit
+SHAs. The Android NDK archive is checksum-verified and external native source
+dependencies are pinned to Git commits.
 
-**Recommendation:** pin the Docker base by digest, pin a tested Rust toolchain,
-use a controlled package snapshot, and record toolchain versions in build
-metadata. Keep the existing artifact hash verification.
+The Docker base remains the mutable `debian:13.2` tag, and APT still resolves
+packages from the configured Debian repositories at build time. These can
+change between builds. The follow-up deliberately does not claim hermetic
+reproducibility or replace the base image without a verified digest and a
+successful multi-architecture Docker build. Pinning the base manifest by
+digest and using a dated Debian snapshot remain outstanding work.
 
 ### F-08 — Authentication validation uses a separately hard-coded request header
 
@@ -204,39 +223,46 @@ the header could introduce a second variable.
 
 **Severity:** Medium when the worker must reach an Apple endpoint whose root is
 absent from the builder's CA bundle  
-**Status:** Not changed; separate from the demonstrated device-identity fix.
+**Status:** Deliberately unchanged; requires private session-validation evidence.
 
-`tools/prepare_rootfs.py` stages the CA bundle supplied by the build
-environment. The issue 23 report separately found that one staged bundle did
-not contain the Apple Root CA needed by `gsa.apple.com`; appending that root
-made `curl` verification succeed, but did not change the native
-`AuthenticateFlow` result. Do not conflate this trust-store correction with
-the device-identity fix. Any future CA addition must be obtained from an
-authoritative Apple certificate source and checked against a published
-fingerprint before being bundled.
+`tools/prepare_rootfs.py` still stages the CA bundle supplied by the build
+environment. The follow-up records its SHA-256 in the generated
+`worker-profile.json`, allowing the exact bundle used for a staged rootfs to
+be identified without copying certificate contents into metadata. A test
+checks the digest and confirms that the certificate bytes are not serialized.
+
+This does **not** add or verify the Apple Root CA, establish that a particular
+root is trusted by Apple, or prove that `gsa.apple.com`/native
+`AuthenticateFlow` succeeds. The issue 23 report separately found a missing
+Apple Root CA in one staged bundle; appending it made `curl` verification
+succeed but did not fix the authentication failure. Any future trust-anchor
+change requires an authoritative Apple source, published fingerprint
+verification, and private endpoint/session tests.
 
 ### F-10 — Sensitive data is intentionally omitted from logs, but runtime access
 still matters
 
 **Severity:** Medium  
-**Status:** Existing controls retained.
+**Status:** Log redaction retained and extended in documentation; deployment access remains sensitive.
 
-The HTTP layer logs allowlisted route names rather than raw paths or query
-strings. Credentials, challenge values, key URIs, tokens and contexts are
-excluded from ordinary logs. Native authentication diagnostics accept only
-bounded enums and numeric fields. However, Docker logs, the data volume,
+HTTP access logs still omit raw paths, query strings, headers, credentials,
+challenge values, key URIs, tokens, and contexts. The optional Bearer token is
+never logged, and the timeout event records only a duration. The token itself
+is supplied through container environment configuration; Docker administrators
+and users with inspect access can read it. Docker logs, the data volume,
 `.env`, the Docker socket and the final image remain security-sensitive.
-The image contains extracted proprietary Apple libraries, and the session
-volume contains persistent authentication state. Keep all of them private.
+Keep them private and restrict daemon access.
 
 ## Architecture map
 
 1. **Build/staging:** `tools/build-docker.sh` supplies the operator's APK/APKM
    to a named BuildKit context. `tools/prepare_rootfs.py` verifies the selected
    profile's manifests and Apple library hashes, verifies vendored Android
-   system files, and stages the root filesystem.
+   system files, records the staged CA-bundle SHA-256 in rootfs metadata, and
+   stages the runtime.
 2. **Rust HTTP facade:** `src/main.rs`, `src/http.rs`, `src/config.rs`,
-   `src/profile.rs` parse configuration and expose the unversioned API.
+   `src/profile.rs` parse configuration, optional Bearer authentication and
+   timeout settings, and expose the unversioned API.
 3. **Supervisor:** `src/worker.rs` serializes operations, frames IPC,
    enforces timeouts and response limits, handles worker recycling, and
    coordinates 2FA.
@@ -251,15 +277,40 @@ volume contains persistent authentication state. Keep all of them private.
 
 ## Verification matrix
 
-| Area | Source/test coverage reviewed | Live validation still required |
+| Area | Source/test coverage in this branch | Live validation still required |
 | --- | --- | --- |
-| Device identity | persistence, atomic creation, concurrent startup, explicit override and legacy identity tests | clean x86_64 fresh login/2FA succeeded; ARM64 live test remains outstanding |
-| HTTP API | synthetic routes, validation, error mapping, and redaction | x86_64 login, challenge, session, credential, playback, and key routes returned expected HTTP responses |
-| Supervisor | mock worker recycle/recovery, cancellation, 2FA, and client disconnect | x86_64 worker replacement and session recovery exercised; failure-mode matrix not exhausted |
-| Native protocol | framing, size/depth checks, 2FA continuation validation, SHA-256/base64 tests | x86_64 Apple authentication and worker IPC exercised; every native edge case remains unverified |
-| Launcher | disposable PID/mount namespaces, orphan reaping, and teardown | clean x86_64 Docker deployment exercised; other kernels and security profiles remain environment-dependent |
-| APK/APKM staging | synthetic package fixtures, manifest/hash/ELF and duplicate-library rejection | the supplied x86_64 deployment completed a private image build; ARM64 build remains unverified |
-| x86-64/ARM64 capture | static profiles, offsets, hashes and context length contracts | x86_64 playback and /key returned HTTP 200; context bytes were not independently validated, and ARM64 was not tested |
+| Device identity | persistence, atomic creation, concurrency, overrides and no-migration tests | clean x86_64 fresh login/2FA succeeded; ARM64 live test outstanding |
+| HTTP API | legacy mode and optional Bearer-token tests, 401 handling, public health route, validation, and redaction | x86_64 login/session flow succeeded before this follow-up; Bearer mode is synthetic-only |
+| Supervisor / 2FA | synthetic worker recycle/recovery, cancellation, configured timeout expiry, pending-state cleanup and re-login | live Apple 2FA timeout and long-wait behavior remain untested |
+| Native protocol | framing, size/depth checks, continuation validation, SHA-256/base64; CMake/CTest added for common C++ tests | proprietary native Apple worker and both ABI capture flows remain unverified by CI |
+| Launcher | disposable PID/mount namespaces, orphan reaping, teardown and C++ launcher target | other kernels and container security profiles remain environment-dependent |
+| APK/APKM staging | synthetic package fixtures, manifest/hash/ELF and duplicate-library rejection; CA bundle digest metadata | exact package extraction is private; ARM64 Docker build not verified here |
+| Build provenance | Rust version and GitHub Actions pinned; NDK and source dependencies pinned | Debian base digest and APT snapshot still mutable |
+| Session-validation header | static source review only; deliberately unchanged | private restore/token-validation test needed before altering the client header |
+| x86_64/ARM64 capture | static profiles, offsets, hashes and context length contracts | x86_64 playback and `/key` returned HTTP 200; context bytes not independently validated; ARM64 not tested |
+
+## Remediation status for the audit/security-hardening draft
+
+This follow-up is intentionally based on the authentication-fix branch and is
+kept in a separate draft pull request. It does not alter the authentication
+branch, `main`, the proprietary native ABI/capture layouts, or the signed
+session-validation request header.
+
+| Finding | Change in this draft | Remaining qualification |
+| --- | --- | --- |
+| F-03 | Optional Bearer-token middleware; `/health` remains public; 401 tests | Disabled by default for client compatibility; no TLS; Docker administrators can inspect environment variables |
+| F-04 | Optional 1–86400 second 2FA idle timeout; worker discarded on expiry | Unset/zero remains indefinite; only synthetic 2FA tested |
+| F-05 | Added CMake/CTest coverage for shared C++ protocol and launcher | Apple-specific native worker/ABI/capture still need private runtime tests |
+| F-06 | Pinned Rust and Actions; expanded CI to run native C++ tests | CI still uses synthetic workers and no proprietary Apple package or credentials |
+| F-07 | Rust toolchain pinned to 1.100.0; GitHub Actions pinned by SHA | Debian base tag and APT repository/package state remain mutable |
+| F-08 | No native header change; retained as an explicit investigation item | Must compare fresh login and cached-session restore privately before changing |
+| F-09 | Record CA bundle SHA-256 in generated rootfs metadata | No Apple root injected; bundle contents and Apple endpoint trust not validated |
+| F-10 | Document token/secret handling and maintain log redaction | Environment, Docker inspect, session volume, logs, daemon and image remain sensitive |
+
+The synthetic tests and documentation are part of this draft and have **not**
+yet passed a GitHub Actions run at the time this document was written. A green
+CI run will still not establish live Apple authentication, cached-session
+restore, playback correctness, context-byte correctness, or ARM64 behavior.
 
 ## Private build-input and verification boundary
 

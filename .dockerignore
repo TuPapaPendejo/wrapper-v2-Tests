@@ -1,8 +1,9 @@
-# Explicit source allowlist: build artifacts, credentials, user APKs,
-# session caches, private notes, and other local files never reach BuildKit.
+# Explicit source allowlist: build artifacts, credentials, user packages,
+# account/session state, and local caches must never enter the Docker context.
 **
 !Cargo.toml
 !Cargo.lock
+!rust-toolchain.toml
 !CMakeLists.txt
 !THIRD_PARTY_NOTICES.md
 !src/

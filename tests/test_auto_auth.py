@@ -36,6 +36,8 @@ class AutoAuthTests(unittest.TestCase):
         self.env = dict(os.environ)
         self.env.pop("WRAPPER_USERNAME", None)
         self.env.pop("WRAPPER_PASSWORD", None)
+        self.env.pop("WRAPPER_API_TOKEN", None)
+        self.env.pop("WRAPPER_2FA_TIMEOUT_SECONDS", None)
         self.env.update(WRAPPER_HOST="127.0.0.1", WRAPPER_PORT=str(self.port),
                         WRAPPER_ARCH="x86_64", WRAPPER_ROOTFS=str(root),
                         WRAPPER_LAUNCHER=str(launch),
@@ -268,7 +270,9 @@ class AutoAuthTests(unittest.TestCase):
         )
         self.wait_for(lambda: self.request("GET", "/session")[0] == 200)
         self.assertEqual(self.request("GET", "/session")[1]["state"], "logged_out")
-        # A timed-out challenge must release the single-worker lock.
+        # A timed-out challenge must release the single-worker lock. Remove
+        # the test deadline so the follow-up challenge cannot race its expiry.
+        self.env.pop("WRAPPER_2FA_TIMEOUT_SECONDS", None)
         status, challenge = self.request(
             "POST", "/session/login",
             {"username": "twofactor", "password": "dummy"},
