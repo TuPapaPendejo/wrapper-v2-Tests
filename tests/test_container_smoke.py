@@ -16,12 +16,18 @@ IMAGE = os.environ.get("WRAPPER_SYNTHETIC_IMAGE", "wrapper-v2:synthetic-ci")
 
 
 def docker(*args, check=True):
-    return subprocess.run(
+    result = subprocess.run(
         ["docker", *args],
-        check=check,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if check and result.returncode != 0:
+        raise RuntimeError(
+            f"docker command exited {result.returncode}: {args!r}\\n"
+            f"stdout:\\n{result.stdout}\\nstderr:\\n{result.stderr}"
+        )
+    return result
 
 
 def request(port, method, path, payload=None, token=TOKEN):
@@ -56,7 +62,8 @@ class SyntheticContainerSmoke(unittest.TestCase):
             "--security-opt=no-new-privileges",
             "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
             "--user", "1000:1000",
-            "-p", f"127.0.0.1:{cls.port}:80",
+            "-p", f"127.0.0.1:{cls.port}:8080",
+            "-e", "WRAPPER_PORT=8080",
             "-e", f"WRAPPER_API_TOKEN={TOKEN}",
             "-e", "WRAPPER_2FA_TIMEOUT_SECONDS=5",
             IMAGE,

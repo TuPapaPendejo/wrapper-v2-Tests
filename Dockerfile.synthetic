@@ -32,7 +32,7 @@ RUN python3 -B /usr/local/bin/prepare-synthetic-rootfs \
       --output /srv/wrapper/rootfs \
     && chown -R 1000:1000 /srv/wrapper /opt/wrapper
 ENV WRAPPER_HOST=0.0.0.0 \
-    WRAPPER_PORT=80 \
+    WRAPPER_PORT=8080 \
     WRAPPER_ARCH=x86_64 \
     WRAPPER_LAUNCHER=/usr/local/bin/worker-mock \
     WRAPPER_ROOTFS=/srv/wrapper/rootfs \
@@ -41,5 +41,5 @@ ENV WRAPPER_HOST=0.0.0.0 \
     RUST_LOG=info
 WORKDIR /srv/wrapper
 USER 1000:1000
-EXPOSE 80
+EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/wrapperd"]
