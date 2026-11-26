@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ServerContract(unittest.TestCase):
     architecture = "x86_64"
+    api_token = None
     @classmethod
     def setUpClass(cls):
         binary = ROOT / "target/debug/wrapperd"
@@ -47,6 +48,8 @@ class ServerContract(unittest.TestCase):
                    WRAPPER_LAUNCHER=str(cls.launcher),
                    WRAPPER_ROOTFS=str(directory),
                    WRAPPER_DEVICE_INFO="a/b/c/d/e/f/g/h/i", RUST_LOG="info")
+        if cls.api_token is not None:
+            env["WRAPPER_API_TOKEN"] = cls.api_token
         cls.log_path = directory / "wrapper.jsonl"
         cls.log_file = cls.log_path.open("wb")
         cls.server = subprocess.Popen(
@@ -81,6 +84,8 @@ class ServerContract(unittest.TestCase):
     def request(cls, method, path, payload=None, auth=True):
         headers = {"Content-Type": "application/json"}
         data = json.dumps(payload).encode() if payload is not None else None
+        if auth and cls.api_token is not None:
+            headers["Authorization"] = f"Bearer {cls.api_token}"
         request = Request(
             f"http://127.0.0.1:{cls.port}{path}", data=data,
             method=method, headers=headers,
@@ -97,8 +102,12 @@ class ServerContract(unittest.TestCase):
         health_status, health = self.request("GET", "/health", auth=False)
         self.assertEqual(health_status, 200)
         self.assertEqual(health["version"], "1.0.0")
-        self.assertEqual(self.request("GET", "/info", auth=False)[0], 200)
-        self.assertEqual(self.request("GET", "/session/credentials")[0], 403)
+        if self.api_token is None:
+            self.assertEqual(self.request("GET", "/info", auth=False)[0], 200)
+            self.assertEqual(self.request("GET", "/session/credentials")[0], 403)
+        else:
+            self.assertEqual(self.request("GET", "/info", auth=False)[0], 401)
+            self.assertEqual(self.request("GET", "/session/credentials", auth=False)[0], 401)
         status, info = self.request("GET", "/info")
         self.assertEqual(status, 200)
         self.assertEqual(info["decryption"], "client_side")
@@ -189,10 +198,22 @@ class ServerContract(unittest.TestCase):
         self.assertEqual(self.request("GET", "/session")[1]["state"], "authenticated")
 
     def test_07_credentials_export(self):
-        status, credentials = self.request("GET", "/session/credentials", auth=False)
+        status, credentials = self.request(
+            "GET", "/session/credentials", auth=self.api_token is not None
+        )
         self.assertEqual(status, 200)
         self.assertEqual(credentials["dev_token"], "mock-developer-token")
         self.assertEqual(credentials["music_user_token"], "mock-media-user-token")
+
+    def test_10_optional_bearer_authentication_preserves_or_protects_routes(self):
+        self.assertEqual(self.request("GET", "/health", auth=False)[0], 200)
+        status, result = self.request("GET", "/session", auth=False)
+        if self.api_token is None:
+            self.assertEqual(status, 200)
+        else:
+            self.assertEqual(status, 401)
+            self.assertEqual(result["error"]["code"], "unauthorized")
+            self.assertEqual(self.request("GET", "/session")[0], 200)
 
     def test_08_logs_are_jsonl_and_do_not_contain_request_secrets(self):
         secret = "private-nonlogging-marker-0123456789"
@@ -246,3 +267,10 @@ class ArmServerContract(ServerContract):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProtectedApiContract(ServerContract):
+    """Run the same synthetic HTTP regression suite with Bearer auth enabled."""
+
+    architecture = "x86_64"
+    api_token = "test-token-" + ("a" * 64)

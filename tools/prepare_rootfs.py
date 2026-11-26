@@ -6,6 +6,13 @@ from architecture import load_profile, verify_elf
 ROOT=Path(__file__).resolve().parents[1]
 PINS=load_profile()
 def digest(data):return hashlib.sha256(data).hexdigest()
+
+def profile_metadata(pins, certificate):
+    """Record the exact CA bundle used to stage this Android root filesystem."""
+    metadata = {key: pins[key] for key in
+                ("architecture", "profile", "context_profile", "context_supported")}
+    metadata["ca_bundle_sha256"] = digest(certificate)
+    return metadata
 def extract_apple(source, pins=None):
     pins = pins or PINS
     split = pins["apk_split"]
@@ -69,7 +76,7 @@ def stage(apk,system,worker,output,ca,pins=None):
         (temp/"tmp").chmod(0o1777)
         (temp/"data/data/com.apple.android.music/files").chmod(0o700)
         (temp/"etc/ssl/certs/ca-certificates.crt").write_bytes(certificate)
-        metadata = {key:pins[key] for key in ("architecture", "profile", "context_profile", "context_supported")}
+        metadata = profile_metadata(pins, certificate)
         (temp/"worker-profile.json").write_text(json.dumps(metadata, sort_keys=True)+"\n")
         # No overwrite: mkdir reserves the destination before moving our verified files.
         output.mkdir()
