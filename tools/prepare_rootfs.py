@@ -8,11 +8,13 @@ PINS=load_profile()
 def digest(data):return hashlib.sha256(data).hexdigest()
 
 def profile_metadata(pins, certificate):
-    """Record the exact CA bundle used to stage this Android root filesystem."""
-    metadata = {key: pins[key] for key in
-                ("architecture", "profile", "context_profile", "context_supported")}
+    """Record the CA bundle identity without embedding or exposing certificates."""
+    keys = ("architecture", "profile", "context_profile", "context_supported")
+    metadata = {key: pins[key] for key in keys}
     metadata["ca_bundle_sha256"] = digest(certificate)
     return metadata
+
+
 def extract_apple(source, pins=None):
     pins = pins or PINS
     split = pins["apk_split"]

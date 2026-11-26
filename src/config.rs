@@ -107,7 +107,7 @@ fn parse_api_token(value: Option<String>) -> Result<Option<Zeroizing<String>>, A
         return Ok(None);
     };
     // Hex/base64url-style tokens only; generate at least 256 bits of entropy.
-    if !(32..=256).contains(&value.len())
+    if !(43..=256).contains(&value.len())
         || !value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
         })
@@ -151,9 +151,13 @@ mod environment_tests {
             parse_api_token(Some("a".repeat(64))).unwrap().unwrap().as_str(),
             "a".repeat(64)
         );
-        for invalid in ["", "short", &"a".repeat(257), "contains spaces ................................"] {
-            assert!(parse_api_token(Some(invalid.to_string())).is_err());
-        }
+        assert!(parse_api_token(Some(String::new())).is_err());
+        assert!(parse_api_token(Some("short".to_string())).is_err());
+        assert!(parse_api_token(Some("a".repeat(257))).is_err());
+        assert!(
+            parse_api_token(Some("contains spaces ................................".to_string()))
+                .is_err()
+        );
     }
 
     #[test]

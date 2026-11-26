@@ -81,11 +81,11 @@ class ServerContract(unittest.TestCase):
             cls.temp.cleanup()
 
     @classmethod
-    def request(cls, method, path, payload=None, auth=True):
+    def request(cls, method, path, payload=None, auth=True, token=None):
         headers = {"Content-Type": "application/json"}
         data = json.dumps(payload).encode() if payload is not None else None
         if auth and cls.api_token is not None:
-            headers["Authorization"] = f"Bearer {cls.api_token}"
+            headers["Authorization"] = f"Bearer {token or cls.api_token}"
         request = Request(
             f"http://127.0.0.1:{cls.port}{path}", data=data,
             method=method, headers=headers,
@@ -213,6 +213,10 @@ class ServerContract(unittest.TestCase):
         else:
             self.assertEqual(status, 401)
             self.assertEqual(result["error"]["code"], "unauthorized")
+            self.assertEqual(
+                self.request("GET", "/session", token="wrong-token")[0],
+                401,
+            )
             self.assertEqual(self.request("GET", "/session")[0], 200)
 
     def test_08_logs_are_jsonl_and_do_not_contain_request_secrets(self):
@@ -265,12 +269,12 @@ class ServerContract(unittest.TestCase):
 class ArmServerContract(ServerContract):
     architecture = "arm64-v8a"
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ProtectedApiContract(ServerContract):
     """Run the same synthetic HTTP regression suite with Bearer auth enabled."""
 
     architecture = "x86_64"
     api_token = "test-token-" + ("a" * 64)
+
+
+if __name__ == "__main__":
+    unittest.main()

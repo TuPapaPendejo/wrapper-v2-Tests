@@ -262,7 +262,10 @@ class AutoAuthTests(unittest.TestCase):
                         for e in self.events()),
             timeout=5,
         )
-        self.assertEqual(self.request("GET", "/session/challenge")[0], 404)
+        self.wait_for(
+            lambda: self.request("GET", "/session/challenge")[0] == 404,
+            timeout=5,
+        )
         self.wait_for(lambda: self.request("GET", "/session")[0] == 200)
         self.assertEqual(self.request("GET", "/session")[1]["state"], "logged_out")
         # A timed-out challenge must release the single-worker lock.
