@@ -61,16 +61,39 @@ jobs:
           set -euo pipefail
           archive="$RUNNER_TEMP/AppleMusic.package"
           rm -f -- "$archive"
-          curl             --fail             --location             --silent             --show-error             --retry 3             --retry-delay 3             --connect-timeout 20             --max-time 1200             --max-filesize 1073741824             --proto '=https'             --proto-redir '=https'             --output "$archive"             "$APPLE_PACKAGE_URL"
-          python3 - "$archive" <<'PY'
+          metadata="$RUNNER_TEMP/AppleMusic.transfer"
+          headers="$RUNNER_TEMP/AppleMusic.headers"
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 1200 \
+            --max-filesize 1073741824 --proto '=https' --proto-redir '=https' \
+            --dump-header "$headers" \
+            --write-out '%{http_code}\n%{content_type}\n%{size_download}\n%{url_effective}\n' \
+            --output "$archive" "$APPLE_PACKAGE_URL" > "$metadata"
+          python3 - "$archive" "$metadata" <<'PY'
           from pathlib import Path
+          from urllib.parse import urlsplit
           import sys
           import zipfile
 
           archive = Path(sys.argv[1])
+          metadata_path = Path(sys.argv[2])
+
+          def report_safe_metadata() -> None:
+              try:
+                  code, content_type, size, effective_url = metadata_path.read_text().splitlines()[:4]
+                  host = urlsplit(effective_url).hostname or "unknown"
+                  print(
+                      f"Safe download diagnostics: HTTP={code}; "
+                      f"Content-Type={content_type[:160]}; bytes={size}; final-host={host}"
+                  )
+              except (OSError, ValueError):
+                  print("Safe download diagnostics: response metadata unavailable.")
+
           if not archive.is_file() or not 1024 <= archive.stat().st_size <= 1073741824:
+              report_safe_metadata()
               raise SystemExit("Downloaded package is empty or outside the 1 KiB–1 GiB size policy.")
           if not zipfile.is_zipfile(archive):
+              report_safe_metadata()
               raise SystemExit("Downloaded package is not a valid APK/APKM ZIP container.")
           with zipfile.ZipFile(archive) as package:
               if package.testzip() is not None:
@@ -97,5 +120,5 @@ jobs:
           docker rm --force "$WRAPPER_PRODUCTION_CONTAINER" >/dev/null 2>&1
           docker image rm --force "$WRAPPER_IMAGE" wrapper-v2:local >/dev/null 2>&1
           docker buildx prune --all --force >/dev/null 2>&1
-          rm -f -- "$RUNNER_TEMP/AppleMusic.package"
+          rm -f -- "$RUNNER_TEMP/AppleMusic.package" "$RUNNER_TEMP/AppleMusic.transfer" "$RUNNER_TEMP/AppleMusic.headers"
           exit 0
