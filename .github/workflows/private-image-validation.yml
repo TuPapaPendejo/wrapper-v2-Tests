@@ -11,7 +11,7 @@ permissions:
 jobs:
   private-production-image:
     # Never expose the package URL to pull_request or pull_request_target workflows.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/audit/security-hardening' && vars.ENABLE_PRIVATE_APPLE_BUILD == 'true' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/audit/security-hardening' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -21,6 +21,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify private build gate
+        shell: bash
+        env:
+          ENABLE_PRIVATE_APPLE_BUILD: ${{ vars.ENABLE_PRIVATE_APPLE_BUILD }}
+        run: |
+          set -euo pipefail
+          if [[ "${ENABLE_PRIVATE_APPLE_BUILD:-}" != "true" ]]; then
+            echo "::error::Repository variable ENABLE_PRIVATE_APPLE_BUILD must be exactly 'true' and visible to this workflow."
+            exit 1
+          fi
+          echo "Private production build gate is enabled."
 
       - name: Verify private package source is configured
         shell: bash
