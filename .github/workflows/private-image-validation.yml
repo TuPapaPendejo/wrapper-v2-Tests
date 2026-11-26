@@ -14,6 +14,8 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/audit/security-hardening' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    outputs:
+      runtime_validation_failed: ${{ steps.finalize-production-validation.outputs.runtime_validation_failed }}
     env:
       WRAPPER_IMAGE: wrapper-v2:private-ci-${{ github.run_id }}
       WRAPPER_PRODUCTION_IMAGE: wrapper-v2:private-ci-${{ github.run_id }}
@@ -102,6 +104,8 @@ jobs:
           echo "Package downloaded and ZIP integrity preflight passed."
 
       - name: Build private production image for x86_64
+        id: build_production
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -109,8 +113,28 @@ jobs:
           rm -f -- "$RUNNER_TEMP/AppleMusic.package"
 
       - name: Run production image and native-worker smoke test
+        id: smoke_production
+        if: ${{ steps.build_production.outcome == 'success' }}
+        continue-on-error: true
         shell: bash
         run: python3 -B tests/test_production_container_smoke.py
+
+      - name: Finalize production runtime validation result
+        id: finalize-production-validation
+        if: always()
+        shell: bash
+        env:
+          BUILD_OUTCOME: ${{ steps.build_production.outcome }}
+          SMOKE_OUTCOME: ${{ steps.smoke_production.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_OUTCOME" == "failure" || "$SMOKE_OUTCOME" == "failure" ]]; then
+            echo "runtime_validation_failed=true" >> "$GITHUB_OUTPUT"
+            echo "::error::Production Docker build or native-worker smoke test failed."
+            exit 1
+          fi
+          echo "runtime_validation_failed=false" >> "$GITHUB_OUTPUT"
+          echo "No production runtime failure occurred; synthetic fallback is not warranted."
 
       - name: Remove private package, container, images, and BuildKit cache
         if: always()
@@ -126,7 +150,7 @@ jobs:
   synthetic-fallback:
     name: Synthetic Docker fallback (only after production validation failure)
     needs: private-production-image
-    if: ${{ always() && needs.private-production-image.result == 'failure' }}
+    if: ${{ always() && needs.private-production-image.result == 'failure' && needs.private-production-image.outputs.runtime_validation_failed == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
