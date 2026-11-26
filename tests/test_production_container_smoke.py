@@ -16,6 +16,8 @@ CONTAINER = os.environ.get("WRAPPER_PRODUCTION_CONTAINER", "wrapper-private-smok
 SESSION_PATH = "/srv/wrapper/rootfs/data/data/com.apple.android.music/files"
 ROOTFS_TMP = "/srv/wrapper/rootfs/tmp"
 EXPECTED_PROFILE = "apple-music-1109-x86_64"
+# Isolated smoke-test credential; it is not an Apple Account or deployment secret.
+TEST_API_TOKEN = "production-smoke-" + ("a" * 64)
 
 
 def docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -40,11 +42,19 @@ def reserve_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def request(port: int, path: str, timeout_seconds: int = 5) -> tuple[int, dict]:
+def request(
+    port: int,
+    path: str,
+    timeout_seconds: int = 5,
+    token: str | None = TEST_API_TOKEN,
+) -> tuple[int, dict]:
+    headers = {"Accept": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         method="GET",
-        headers={"Accept": "application/json"},
+        headers=headers,
     )
     try:
         response = urllib.request.urlopen(req, timeout=timeout_seconds)
@@ -106,6 +116,7 @@ def main() -> None:
             "--cap-add=SYS_ADMIN",
             "--cap-add=SYS_CHROOT",
             "--security-opt=apparmor:unconfined",
+            "--env", f"WRAPPER_API_TOKEN={TEST_API_TOKEN}",
             "--user=1000:1000",
             "--tmpfs", f"{ROOTFS_TMP}:rw,nosuid,nodev,mode=1777",
             "--tmpfs", f"{SESSION_PATH}:rw,nosuid,nodev,mode=0770,uid=1000,gid=1000",
@@ -122,7 +133,7 @@ def main() -> None:
             )
             if state.returncode == 0 and state.stdout.strip() == "true":
                 try:
-                    status, health = request(port, "/health", timeout_seconds=2)
+                    status, health = request(port, "/health", timeout_seconds=2, token=None)
                     if status == 200 and health.get("status") == "ok":
                         break
                 except (OSError, RuntimeError, urllib.error.URLError):
@@ -131,9 +142,20 @@ def main() -> None:
         else:
             raise RuntimeError("production image did not become healthy within 90 seconds")
 
+        # Exercise the configured Bearer middleware in the actual production image.
+        status, denied = request(port, "/info", token=None)
+        if status != 401 or (denied.get("error") or {}).get("code") != "unauthorized":
+            raise RuntimeError("/info did not reject a request without a Bearer token")
+        status, denied = request(port, "/info", token="invalid-smoke-token")
+        if status != 401 or (denied.get("error") or {}).get("code") != "unauthorized":
+            raise RuntimeError("/info did not reject an invalid Bearer token")
+        status, health = request(port, "/health", token=None)
+        if status != 200 or health.get("status") != "ok":
+            raise RuntimeError("/health must remain publicly accessible without a Bearer token")
+
         status, info = request(port, "/info")
         if status != 200:
-            raise RuntimeError(f"/info returned HTTP {status}")
+            raise RuntimeError(f"authenticated /info returned HTTP {status}")
         if info.get("architecture") != "x86_64" or info.get("profile") != EXPECTED_PROFILE:
             raise RuntimeError("production image reports an unexpected runtime profile")
         if info.get("context_supported") is not True:
@@ -152,7 +174,7 @@ def main() -> None:
         else:
             raise RuntimeError(f"/session returned unexpected HTTP status {status}")
 
-        status, health = request(port, "/health")
+        status, health = request(port, "/health", token=None)
         if status != 200 or health.get("status") != "ok":
             raise RuntimeError("production container stopped responding after native-worker startup")
 
@@ -161,8 +183,9 @@ def main() -> None:
             raise RuntimeError("production container exited during the native-worker smoke test")
 
         print("Production x86_64 image smoke test passed.")
-        print("Verified: runtime profile, loopback binding, read-only rootfs, least-privilege capabilities,")
-        print("ephemeral session storage, HTTP health, and native-worker startup without Apple credentials.")
+        print("Verified: runtime profile, loopback binding, read-only rootfs, and least-privilege capabilities.")
+        print("Verified: public health, Bearer rejection/acceptance, ephemeral session storage,")
+        print("and native-worker startup without Apple Account credentials.")
     finally:
         if created:
             docker("rm", "--force", CONTAINER, check=False)
