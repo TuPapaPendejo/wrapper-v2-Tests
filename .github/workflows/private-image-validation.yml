@@ -1,0 +1,89 @@
+name: Private x86_64 image validation
+
+on:
+  push:
+    branches:
+      - audit/security-hardening
+
+permissions:
+  contents: read
+
+jobs:
+  private-production-image:
+    # Never expose the package URL to pull_request or pull_request_target workflows.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/audit/security-hardening' && vars.ENABLE_PRIVATE_APPLE_BUILD == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      WRAPPER_IMAGE: wrapper-v2:private-ci-${{ github.run_id }}
+      WRAPPER_PRODUCTION_IMAGE: wrapper-v2:private-ci-${{ github.run_id }}
+      WRAPPER_PRODUCTION_CONTAINER: wrapper-private-${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify private package source is configured
+        shell: bash
+        env:
+          APPLE_PACKAGE_URL: ${{ secrets.APPLE_PACKAGE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_PACKAGE_URL:-}" ]]; then
+            echo "::error::APPLE_PACKAGE_URL is not configured as a repository Actions secret."
+            exit 1
+          fi
+          case "$APPLE_PACKAGE_URL" in
+            https://*) ;;
+            *)
+              echo "::error::APPLE_PACKAGE_URL must use HTTPS."
+              exit 1
+              ;;
+          esac
+          echo "Private package URL secret is present; its value is withheld."
+
+      - name: Download authorized package to ephemeral runner storage
+        shell: bash
+        env:
+          APPLE_PACKAGE_URL: ${{ secrets.APPLE_PACKAGE_URL }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/AppleMusic.package"
+          rm -f -- "$archive"
+          curl             --fail             --location             --silent             --show-error             --retry 3             --retry-delay 3             --connect-timeout 20             --max-time 1200             --max-filesize 1073741824             --proto '=https'             --proto-redir '=https'             --output "$archive"             "$APPLE_PACKAGE_URL"
+          python3 - "$archive" <<'PY'
+          from pathlib import Path
+          import sys
+          import zipfile
+
+          archive = Path(sys.argv[1])
+          if not archive.is_file() or not 1024 <= archive.stat().st_size <= 1073741824:
+              raise SystemExit("Downloaded package is empty or outside the 1 KiB–1 GiB size policy.")
+          if not zipfile.is_zipfile(archive):
+              raise SystemExit("Downloaded package is not a valid APK/APKM ZIP container.")
+          with zipfile.ZipFile(archive) as package:
+              if package.testzip() is not None:
+                  raise SystemExit("Downloaded APK/APKM contains a corrupt ZIP member.")
+          PY
+          echo "Package downloaded and ZIP integrity preflight passed."
+
+      - name: Build private production image for x86_64
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./tools/build-docker.sh "$RUNNER_TEMP/AppleMusic.package" --arch x86_64
+          rm -f -- "$RUNNER_TEMP/AppleMusic.package"
+
+      - name: Run production image and native-worker smoke test
+        shell: bash
+        run: python3 -B tests/test_production_container_smoke.py
+
+      - name: Remove private package, container, images, and BuildKit cache
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker rm --force "$WRAPPER_PRODUCTION_CONTAINER" >/dev/null 2>&1
+          docker image rm --force "$WRAPPER_IMAGE" wrapper-v2:local >/dev/null 2>&1
+          docker buildx prune --all --force >/dev/null 2>&1
+          rm -f -- "$RUNNER_TEMP/AppleMusic.package"
+          exit 0
