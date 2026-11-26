@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from pathlib import Path
 import subprocess
 import time
 import urllib.error
@@ -69,6 +70,66 @@ def request(
         raise RuntimeError(f"{path} returned an unexpected JSON shape")
     return response.status, payload
 
+
+def read_process_status(pid: int) -> dict[str, str]:
+    try:
+        entries = {}
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                entries[key] = value.strip()
+        return entries
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError(f"cannot inspect process security state for PID {pid}") from error
+
+
+def check_process_capabilities() -> None:
+    inspected = json.loads(docker("inspect", CONTAINER).stdout)[0]
+    wrapper_pid = int(inspected["State"]["Pid"])
+    violations: list[str] = []
+
+    def check_unprivileged(pid: int, name: str, require_no_new_privs: bool = False) -> None:
+        status = read_process_status(pid)
+        uid = status.get("Uid", "").split()
+        if not uid or uid[0] != "1000":
+            violations.append(f"{name}: expected UID 1000")
+        for field in ("CapEff", "CapPrm", "CapAmb"):
+            raw = status.get(field, "0")
+            try:
+                capabilities = int(raw, 16)
+            except ValueError:
+                violations.append(f"{name}: invalid {field} value")
+                continue
+            if capabilities:
+                violations.append(f"{name}: {field}={raw} (must be zero)")
+        if require_no_new_privs and status.get("NoNewPrivs") != "1":
+            violations.append(f"{name}: NoNewPrivs is not enabled")
+
+    # Docker's CapAdd is required by the launcher executable, not by the HTTP server.
+    check_unprivileged(wrapper_pid, "wrapperd")
+
+    processes = docker("top", CONTAINER, "-eo", "pid,comm").stdout.splitlines()
+    native_workers: list[tuple[int, str]] = []
+    launchers: list[tuple[int, str]] = []
+    for line in processes:
+        fields = line.split(None, 1)
+        if len(fields) != 2 or not fields[0].isdigit():
+            continue
+        pid, command = int(fields[0]), fields[1].strip()
+        if command == "worker-launch":
+            launchers.append((pid, command))
+        elif command.startswith("apple-music"):
+            native_workers.append((pid, command))
+
+    for pid, command in launchers:
+        check_unprivileged(pid, command)
+    if not native_workers:
+        violations.append("native Apple worker was not visible in the container process table")
+    for pid, command in native_workers:
+        check_unprivileged(pid, command, require_no_new_privs=True)
+
+    if violations:
+        raise RuntimeError("process privilege audit failed: " + "; ".join(violations))
 
 def check_container_policy() -> None:
     inspected = json.loads(docker("inspect", CONTAINER).stdout)[0]
@@ -149,6 +210,8 @@ def main() -> None:
         status, denied = request(port, "/info", token="invalid-smoke-token")
         if status != 401 or (denied.get("error") or {}).get("code") != "unauthorized":
             raise RuntimeError("/info did not reject an invalid Bearer token")
+        check_process_capabilities()
+
         status, health = request(port, "/health", token=None)
         if status != 200 or health.get("status") != "ok":
             raise RuntimeError("/health must remain publicly accessible without a Bearer token")
